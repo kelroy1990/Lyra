@@ -1,6 +1,6 @@
-idf_component_register(SRCS "hello_world_main.c" "usb_descriptors.c"
+idf_component_register(SRCS "app_main.c" "usb_descriptors.c" "usb_cdc_vfs.c"
                        INCLUDE_DIRS "."
-                       PRIV_REQUIRES usb)
+                       PRIV_REQUIRES usb vfs)
 
 # Inject our tusb_config.h into TinyUSB's compilation so it finds our config
 # instead of looking for a missing one. This replicates what esp_tinyusb did.

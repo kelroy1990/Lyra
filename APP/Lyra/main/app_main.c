@@ -9,14 +9,15 @@
 #include "esp_private/usb_phy.h"
 #include "tusb.h"
 #include "usb_descriptors.h"
+#include "usb_cdc_vfs.h"
 
-static const char *TAG = "walkman_dac";
+static const char *TAG = "lyra";
 
 //--------------------------------------------------------------------+
 // Supported sample rates
 //--------------------------------------------------------------------+
 
-static const uint32_t sample_rates[] = {44100, 48000, 88200, 96000};
+static const uint32_t sample_rates[] = {44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000};
 #define N_SAMPLE_RATES  (sizeof(sample_rates) / sizeof(sample_rates[0]))
 
 static uint32_t current_sample_rate = 44100;
@@ -35,7 +36,7 @@ enum {
 };
 
 // Dummy buffer to consume audio data (will be replaced by I2S output later)
-static uint16_t spk_buf[CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ / 2];
+static uint32_t spk_buf[CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ / 4];
 
 //--------------------------------------------------------------------+
 // USB PHY + TinyUSB initialization
@@ -260,7 +261,7 @@ void tud_umount_cb(void)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Walkman USB DAC - Initializing");
+    ESP_LOGI(TAG, "Lyra USB DAC - Initializing");
 
     // 1. Initialize USB PHY for High-Speed
     usb_phy_init();
@@ -273,7 +274,10 @@ void app_main(void)
     // rhport 1 = High-Speed OTG 2.0 on ESP32-P4
     tusb_init(1, &dev_init);
 
-    ESP_LOGI(TAG, "TinyUSB initialized (High-Speed, UAC2 Speaker)");
+    ESP_LOGI(TAG, "TinyUSB initialized (High-Speed, UAC2 Speaker + CDC)");
+
+    // 2b. Register CDC VFS and redirect stdout/stderr to USB CDC
+    usb_cdc_vfs_register();
 
     // 3. Create TinyUSB device task (handles USB events)
     xTaskCreatePinnedToCore(tusb_device_task, "TinyUSB", 4096, NULL, 5, NULL, 1);

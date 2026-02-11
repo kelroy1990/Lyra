@@ -43,7 +43,11 @@ uint8_t const *tud_descriptor_device_cb(void)
 #define EPNUM_AUDIO_FB    0x01
 #define EPNUM_AUDIO_OUT   0x01
 
-#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_AUDIO_SPEAKER_STEREO_FB_DESC_LEN)
+#define EPNUM_CDC_NOTIF   0x82
+#define EPNUM_CDC_OUT     0x03
+#define EPNUM_CDC_IN      0x83
+
+#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_AUDIO_SPEAKER_STEREO_FB_DESC_LEN + TUD_CDC_DESC_LEN)
 
 uint8_t const desc_configuration[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 100),
@@ -55,6 +59,10 @@ uint8_t const desc_configuration[] = {
         CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX,
         EPNUM_AUDIO_FB | 0x80,
         4),
+
+    // CDC: ITF 2, string idx 5, notification EP, bulk data EP OUT/IN (512 for HS)
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 5, EPNUM_CDC_NOTIF, 8,
+                       EPNUM_CDC_OUT, EPNUM_CDC_IN, 512),
 };
 
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
@@ -69,10 +77,11 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 
 static char const *string_desc_arr[] = {
     (const char[]) { 0x09, 0x04 },  // 0: English (0x0409)
-    "Walkman",                       // 1: Manufacturer
-    "Walkman USB DAC",               // 2: Product
+    "Lyra",                          // 1: Manufacturer
+    "Lyra USB DAC",                  // 2: Product
     "000001",                        // 3: Serial
     "UAC2 Speaker",                  // 4: Audio Interface
+    "CDC Serial",                    // 5: CDC Interface
 };
 
 static uint16_t _desc_str[32 + 1];
