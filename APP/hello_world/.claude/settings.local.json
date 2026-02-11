@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(ls -la \"d:\\\\1.- Personal Proyects\\\\Firmware Walkman\\\\APP\\\\hello_world\\\\components\\\\esp\\\\v5.5.2\\\\esp-idf\\\\components\"\" 2>nul | findstr \"usb\" || echo \"Checking ESP-IDF structure... \")"
+    ]
+  }
+}
