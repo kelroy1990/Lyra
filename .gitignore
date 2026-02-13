@@ -1,7 +1,7 @@
 # Build
 build/
 out/
-esp/v5.5.2/esp-idf/
+APP/Lyra/components/esp/
 
 # IDE
 .vscode/
