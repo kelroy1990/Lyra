@@ -1,12 +1,14 @@
 # Build
 build/
 out/
+esp/v5.5.2/esp-idf/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *~
+.claude/
 
 # OS
 .DS_Store
