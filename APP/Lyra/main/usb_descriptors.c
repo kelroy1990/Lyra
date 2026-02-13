@@ -1,27 +1,24 @@
+#include <string.h>
 #include "tusb.h"
 #include "usb_descriptors.h"
 
 //--------------------------------------------------------------------+
-// Device Descriptor
+// Device Descriptor (IAD for composite Audio + CDC)
 //--------------------------------------------------------------------+
-
-#define _PID_MAP(itf, n)  ( (CFG_TUD_##itf) << (n) )
-#define USB_PID           (0x4000 | _PID_MAP(CDC, 0) | _PID_MAP(MSC, 1) | _PID_MAP(HID, 2) | \
-    _PID_MAP(MIDI, 3) | _PID_MAP(AUDIO, 4) | _PID_MAP(VENDOR, 5) )
 
 tusb_desc_device_t const desc_device = {
     .bLength            = sizeof(tusb_desc_device_t),
     .bDescriptorType    = TUSB_DESC_DEVICE,
     .bcdUSB             = 0x0200,
 
-    // IAD for Audio
+    // Composite device with IAD
     .bDeviceClass       = TUSB_CLASS_MISC,
     .bDeviceSubClass    = MISC_SUBCLASS_COMMON,
     .bDeviceProtocol    = MISC_PROTOCOL_IAD,
     .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
 
     .idVendor           = 0xCafe,
-    .idProduct          = USB_PID,
+    .idProduct          = 0x4012,
     .bcdDevice          = 0x0100,
 
     .iManufacturer      = 0x01,
@@ -40,9 +37,11 @@ uint8_t const *tud_descriptor_device_cb(void)
 // Configuration Descriptor
 //--------------------------------------------------------------------+
 
-#define EPNUM_AUDIO_FB    0x01
+// Audio endpoints (EP 1 OUT for data, EP 1 IN for feedback)
 #define EPNUM_AUDIO_OUT   0x01
+#define EPNUM_AUDIO_FB    0x81
 
+// CDC endpoints (EP 2 IN for notification, EP 3 for bulk data)
 #define EPNUM_CDC_NOTIF   0x82
 #define EPNUM_CDC_OUT     0x03
 #define EPNUM_CDC_IN      0x83
@@ -52,15 +51,17 @@ uint8_t const *tud_descriptor_device_cb(void)
 uint8_t const desc_configuration[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 100),
 
-    TUD_AUDIO_SPEAKER_STEREO_FB_DESCRIPTOR(0, 4,
+    // UAC2 Speaker: ITF 0-1, string idx 4
+    TUD_AUDIO_SPEAKER_STEREO_FB_DESCRIPTOR(
+        ITF_NUM_AUDIO_CONTROL, 4,
         CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX,
         CFG_TUD_AUDIO_FUNC_1_RESOLUTION_RX,
         EPNUM_AUDIO_OUT,
         CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX,
-        EPNUM_AUDIO_FB | 0x80,
+        EPNUM_AUDIO_FB,
         4),
 
-    // CDC: ITF 2, string idx 5, notification EP, bulk data EP OUT/IN (512 for HS)
+    // CDC: ITF 2-3, string idx 5
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 5, EPNUM_CDC_NOTIF, 8,
                        EPNUM_CDC_OUT, EPNUM_CDC_IN, 512),
 };
@@ -80,7 +81,7 @@ static char const *string_desc_arr[] = {
     "Lyra",                          // 1: Manufacturer
     "Lyra USB DAC",                  // 2: Product
     "000001",                        // 3: Serial
-    "UAC2 Speaker",                  // 4: Audio Interface
+    "Lyra HiFi Dac",                  // 4: Audio Interface
     "CDC Serial",                    // 5: CDC Interface
 };
 

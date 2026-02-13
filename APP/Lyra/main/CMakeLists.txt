@@ -1,10 +1,9 @@
-idf_component_register(SRCS "app_main.c" "usb_descriptors.c" "usb_cdc_vfs.c"
+idf_component_register(SRCS "app_main.c" "usb_descriptors.c"
                        INCLUDE_DIRS "."
-                       PRIV_REQUIRES usb vfs)
+                       PRIV_REQUIRES usb tinyusb)
 
 # Inject our tusb_config.h into TinyUSB's compilation so it finds our config
-# instead of looking for a missing one. This replicates what esp_tinyusb did.
-idf_component_get_property(tusb_lib espressif__tinyusb COMPONENT_LIB)
+idf_component_get_property(tusb_lib tinyusb COMPONENT_LIB)
 target_include_directories(${tusb_lib} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # TinyUSB expects descriptor callbacks implemented by the application.
