@@ -24,9 +24,9 @@ static const char *TAG = "lyra";
 
 #define I2S_MCLK_PIN    GPIO_NUM_13
 #define I2S_BCLK_PIN    GPIO_NUM_12
-#define I2S_DOUT_PIN    GPIO_NUM_11
+#define I2S_DOUT_PIN    GPIO_NUM_9   // CORREGIDO: DO (output) va a GPIO 9 (según ejemplo oficial)
 #define I2S_LRCK_PIN    GPIO_NUM_10
-#define I2S_DIN_PIN     GPIO_NUM_9
+#define I2S_DIN_PIN     GPIO_NUM_11  // CORREGIDO: DI (input) va a GPIO 11 (según ejemplo oficial)
 #define I2C_SDA_PIN     GPIO_NUM_7
 #define I2C_SCL_PIN     GPIO_NUM_8
 #define AMP_EN_PIN      GPIO_NUM_53
@@ -155,7 +155,114 @@ static void codec_init(void)
     // Set volume (0-100 range, mapped to dB internally)
     esp_codec_dev_set_out_vol(codec_dev, 80);
 
+    // DIAGNOSTIC: Explicitly unmute the DAC
+    ESP_LOGI(TAG, "Setting DAC unmute...");
+    esp_codec_dev_set_out_mute(codec_dev, false);
+
     ESP_LOGI(TAG, "ES8311 codec initialized via esp_codec_dev (slave, 32-bit, vol=80)");
+
+    // DIAGNOSTIC: Configure amplifier GPIO (bypass driver)
+    ESP_LOGI(TAG, "=== Amplifier Configuration ===");
+
+    // Configure GPIO 53 directly as OUTPUT with pull-up and max drive
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << AMP_EN_PIN),
+        .mode = GPIO_MODE_OUTPUT,  // Directly as OUTPUT (don't read input state first)
+        .pull_up_en = GPIO_PULLUP_ENABLE,  // Internal pull-up to help with external 53K pull-down
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+
+    // Set maximum drive strength (40mA) to overcome 53K pull-down
+    ESP_ERROR_CHECK(gpio_set_drive_capability(AMP_EN_PIN, GPIO_DRIVE_CAP_3));
+
+    // Set GPIO HIGH to enable amplifier
+    ESP_ERROR_CHECK(gpio_set_level(AMP_EN_PIN, 1));
+
+    // HOLD the GPIO state to prevent any changes
+    ESP_ERROR_CHECK(gpio_hold_en(AMP_EN_PIN));
+
+    ESP_LOGI(TAG, "Amplifier GPIO %d: OUTPUT + PULL-UP + MAX drive + HOLD + HIGH", AMP_EN_PIN);
+    ESP_LOGW(TAG, "Note: GPIO 53 has external 53K pull-down, gpio_get_level() may read LOW from pin");
+    ESP_LOGI(TAG, "Amplifier should be ENABLED (software configured GPIO HIGH)");
+
+    // DIAGNOSTIC: Read critical ES8311 registers
+    ESP_LOGI(TAG, "=== ES8311 Critical Registers ===");
+    int reg_val;
+
+    // Power Management registers
+    ret = esp_codec_dev_read_reg(codec_dev, 0x0D, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x0D (System PDN): 0x%02x (should be 0x01 for normal)", reg_val);
+    }
+    ret = esp_codec_dev_read_reg(codec_dev, 0x0E, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x0E (System PDN2): 0x%02x (should be 0x02 for normal)", reg_val);
+    }
+
+    // System Control registers
+    ret = esp_codec_dev_read_reg(codec_dev, 0x10, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x10 (CHIP LP1): 0x%02x", reg_val);
+    }
+    ret = esp_codec_dev_read_reg(codec_dev, 0x11, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x11 (CHIP LP2): 0x%02x", reg_val);
+    }
+    ret = esp_codec_dev_read_reg(codec_dev, 0x12, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x12 (CHIP LP3): 0x%02x", reg_val);
+    }
+
+    // ADC/DAC Control
+    ret = esp_codec_dev_read_reg(codec_dev, 0x14, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x14 (DAC PDN): 0x%02x (bit 6: 0=power on)", reg_val);
+    }
+    ret = esp_codec_dev_read_reg(codec_dev, 0x15, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x15 (DAC ModeCfg): 0x%02x", reg_val);
+    }
+    ret = esp_codec_dev_read_reg(codec_dev, 0x17, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x17 (ADC PDN): 0x%02x", reg_val);
+    }
+
+    // DAC Control
+    ret = esp_codec_dev_read_reg(codec_dev, 0x31, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x31 (DAC Mute): 0x%02x (bit 0: 0=unmute, 1=mute)", reg_val);
+    }
+    ret = esp_codec_dev_read_reg(codec_dev, 0x32, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x32 (DAC Vol): 0x%02x (0xB2=%d/255)", reg_val, reg_val);
+    }
+    ret = esp_codec_dev_read_reg(codec_dev, 0x37, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x37 (DAC Offset): 0x%02x", reg_val);
+    }
+
+    // Reset/Mode and Clock
+    ret = esp_codec_dev_read_reg(codec_dev, 0x00, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x00 (Reset): 0x%02x (bit 7: master/slave)", reg_val);
+    }
+    ret = esp_codec_dev_read_reg(codec_dev, 0x01, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x01 (CLK): 0x%02x (bit 7: MCLK off/on)", reg_val);
+    }
+
+    // I2S Format
+    ret = esp_codec_dev_read_reg(codec_dev, 0x09, &reg_val);
+    if (ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Reg 0x09 (SDPIN): 0x%02x (I2S format, bits 4-2: data length)", reg_val);
+    }
+
+    ESP_LOGI(TAG, "=== HW Gain Config ===");
+    ESP_LOGI(TAG, "PA voltage: %.1f V, DAC voltage: %.1f V", 5.0, 3.3);
+
+    ESP_LOGI(TAG, "=== Diagnostic Complete ===");
 }
 
 //--------------------------------------------------------------------+
