@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS
+        "audio_pipeline.c"
+        "dsp_biquad.c"
+        "dsp_chain.c"
+        "dsp_presets.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        log
+)

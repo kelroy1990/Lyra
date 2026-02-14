@@ -15,6 +15,7 @@
 #include "esp_codec_dev.h"
 #include "tusb.h"
 #include "usb_descriptors.h"
+#include "audio_pipeline.h"
 
 static const char *TAG = "lyra";
 
@@ -553,6 +554,10 @@ static void audio_task(void *arg)
             // Reconfigure ONLY I2S with new settings (only if streaming is active)
             if (current_bits_per_sample > 0) {  // Only if streaming is active (alt != 0)
                 i2s_output_init(current_sample_rate, current_bits_per_sample);
+
+                // Update audio pipeline with new format
+                audio_pipeline_update_format(current_sample_rate, current_bits_per_sample);
+
                 ESP_LOGI(TAG, "Audio format reconfigured: %lu Hz, %d-bit",
                          current_sample_rate, current_bits_per_sample);
                 // Note: ES8311 DAC initialized with 32-bit can handle 16/24/32-bit without reconfiguration
@@ -565,6 +570,14 @@ static void audio_task(void *arg)
             uint16_t to_read = (available < sizeof(spk_buf)) ? available : sizeof(spk_buf);
             uint16_t n_read = tud_audio_read(spk_buf, to_read);
             if (n_read > 0 && i2s_tx) {
+                // Process audio through DSP chain (EQ, filters, etc.)
+                // Buffer is int32 stereo interleaved (L,R,L,R,...)
+                int32_t *buf_i32 = (int32_t*)spk_buf;
+                uint32_t frames = n_read / (2 * 4);  // 2 channels, 4 bytes per sample
+
+                audio_pipeline_process(buf_i32, frames);
+
+                // Send processed audio to I2S -> DAC
                 size_t bytes_written;
                 i2s_channel_write(i2s_tx, spk_buf, n_read, &bytes_written, 10);
                 total_bytes += bytes_written;
@@ -595,12 +608,121 @@ static void audio_task(void *arg)
 static void cdc_task(void *arg)
 {
     (void)arg;
+    static char rx_buf[64];
+    static uint8_t rx_idx = 0;
+    static bool first_prompt = true;
+
+    ESP_LOGI(TAG, "CDC task started - Type 'help' for commands");
+
     while (1) {
-        if (tud_cdc_connected()) {
-            tud_cdc_write_str("Hello from Lyra!\r\n");
+        // Send initial prompt once CDC is connected
+        if (tud_cdc_connected() && first_prompt) {
+            vTaskDelay(pdMS_TO_TICKS(100));  // Small delay for terminal to be ready
+            tud_cdc_write_str("\r\n=== Lyra USB DAC ===\r\nType 'help' for commands\r\n> ");
             tud_cdc_write_flush();
+            first_prompt = false;
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        if (tud_cdc_connected() && tud_cdc_available()) {
+            char c = tud_cdc_read_char();
+
+            // Echo character (except CR/LF)
+            if (c != '\r' && c != '\n') {
+                tud_cdc_write_char(c);
+                tud_cdc_write_flush();
+            }
+
+            if (c == '\n' || c == '\r') {
+                if (rx_idx > 0) {
+                    rx_buf[rx_idx] = '\0';
+                    tud_cdc_write_str("\r\n");
+                    ESP_LOGI(TAG, "CDC command: '%s'", rx_buf);
+
+                    // Process command
+                    if (strcmp(rx_buf, "help") == 0) {
+                        tud_cdc_write_str("=== Lyra USB DAC Commands ===\r\n");
+                        tud_cdc_write_str("Presets:\r\n");
+                        tud_cdc_write_str("  flat     - Flat (bypass)\r\n");
+                        tud_cdc_write_str("  rock     - Rock (+12dB bass @ 100Hz)\r\n");
+                        tud_cdc_write_str("  jazz     - Jazz (smooth)\r\n");
+                        tud_cdc_write_str("  classical- Classical (V-shape)\r\n");
+                        tud_cdc_write_str("  headphone- Headphone (crossfeed)\r\n");
+                        tud_cdc_write_str("  bass     - Bass Boost (+8dB)\r\n");
+                        tud_cdc_write_str("  test     - TEST (+20dB @ 1kHz) EXTREME!\r\n");
+                        tud_cdc_write_str("Control:\r\n");
+                        tud_cdc_write_str("  on       - Enable DSP\r\n");
+                        tud_cdc_write_str("  off      - Disable DSP (bypass)\r\n");
+                        tud_cdc_write_str("  status   - Show current settings\r\n");
+                    } else if (strcmp(rx_buf, "flat") == 0) {
+                        audio_pipeline_set_preset(PRESET_FLAT);
+                        tud_cdc_write_str("Preset: Flat (bypass)\r\n");
+                    } else if (strcmp(rx_buf, "rock") == 0) {
+                        audio_pipeline_set_preset(PRESET_ROCK);
+                        audio_pipeline_set_enabled(true);
+                        tud_cdc_write_str("Preset: Rock\r\n");
+                    } else if (strcmp(rx_buf, "jazz") == 0) {
+                        audio_pipeline_set_preset(PRESET_JAZZ);
+                        audio_pipeline_set_enabled(true);
+                        tud_cdc_write_str("Preset: Jazz\r\n");
+                    } else if (strcmp(rx_buf, "classical") == 0) {
+                        audio_pipeline_set_preset(PRESET_CLASSICAL);
+                        audio_pipeline_set_enabled(true);
+                        tud_cdc_write_str("Preset: Classical\r\n");
+                    } else if (strcmp(rx_buf, "headphone") == 0) {
+                        audio_pipeline_set_preset(PRESET_HEADPHONE);
+                        audio_pipeline_set_enabled(true);
+                        tud_cdc_write_str("Preset: Headphone\r\n");
+                    } else if (strcmp(rx_buf, "bass") == 0) {
+                        audio_pipeline_set_preset(PRESET_BASS_BOOST);
+                        audio_pipeline_set_enabled(true);
+                        tud_cdc_write_str("Preset: Bass Boost\r\n");
+                    } else if (strcmp(rx_buf, "test") == 0) {
+                        audio_pipeline_set_preset(PRESET_TEST_EXTREME);
+                        audio_pipeline_set_enabled(true);
+                        tud_cdc_write_str("Preset: TEST EXTREME (+20dB @ 1kHz) - Should be VERY audible!\r\n");
+                    } else if (strcmp(rx_buf, "on") == 0) {
+                        audio_pipeline_set_enabled(true);
+                        tud_cdc_write_str("DSP: ON\r\n");
+                    } else if (strcmp(rx_buf, "off") == 0) {
+                        audio_pipeline_set_enabled(false);
+                        tud_cdc_write_str("DSP: OFF (bypass)\r\n");
+                    } else if (strcmp(rx_buf, "status") == 0) {
+                        eq_preset_t preset = audio_pipeline_get_preset();
+                        bool enabled = audio_pipeline_is_enabled();
+                        char status[128];
+                        snprintf(status, sizeof(status),
+                                 "Status:\r\n  Preset: %s\r\n  DSP: %s\r\n",
+                                 preset_get_name(preset),
+                                 enabled ? "ON" : "OFF");
+                        tud_cdc_write_str(status);
+                    } else {
+                        tud_cdc_write_str("Unknown command. Type 'help'\r\n");
+                    }
+
+                    tud_cdc_write_str("> ");
+                    tud_cdc_write_flush();
+                    rx_idx = 0;
+                } else {
+                    // Empty line, just show prompt
+                    tud_cdc_write_str("\r\n> ");
+                    tud_cdc_write_flush();
+                }
+            } else if (c == '\b' || c == 127) {  // Backspace
+                if (rx_idx > 0) {
+                    rx_idx--;
+                    tud_cdc_write_str("\b \b");
+                    tud_cdc_write_flush();
+                }
+            } else if (c >= 32 && c < 127 && rx_idx < sizeof(rx_buf) - 1) {
+                // Printable character
+                rx_buf[rx_idx++] = c;
+            }
+        } else if (!tud_cdc_connected()) {
+            // Reset when disconnected
+            first_prompt = true;
+            rx_idx = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -640,6 +762,20 @@ void app_main(void)
     // 3. ES8311 codec via esp_codec_dev (handles all register setup + PA)
     codec_init();
     ESP_LOGI(TAG, "Codec init done");
+
+    // 3.5. Audio Pipeline (DSP/EQ processing)
+    ESP_LOGI(TAG, "Init Audio Pipeline (DSP)...");
+    audio_pipeline_init(48000, 32);  // Match initial I2S format
+
+    // For testing: Start with Rock preset to hear DSP effect immediately
+    audio_pipeline_set_preset(PRESET_ROCK);  // Bass +6dB, Treble +3dB
+    audio_pipeline_set_enabled(true);
+
+    // For production: Start with Flat (bypass)
+    // audio_pipeline_set_preset(PRESET_FLAT);
+
+    ESP_LOGI(TAG, "Audio Pipeline initialized with preset: %s",
+             preset_get_name(audio_pipeline_get_preset()));
 
     // 4. USB PHY + TinyUSB
     ESP_LOGI(TAG, "Init USB PHY...");
