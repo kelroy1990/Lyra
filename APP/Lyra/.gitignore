@@ -30,7 +30,6 @@ build/
 *.map
 flasher_args.json # Generated in build directory
 sdkconfig.old
-sdkconfig
 
 # ESP-IDF dependencies
 # For older versions or manual component management
@@ -61,6 +60,9 @@ venv/
 .venv/
 env/
 
+# Claude
+.claude/
+
 # Language Servers
 .clangd/
 .ccls-cache/
@@ -70,6 +72,9 @@ compile_commands.json
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# Windows artifacts
+nul
 
 # User-specific configuration files
 *.user
