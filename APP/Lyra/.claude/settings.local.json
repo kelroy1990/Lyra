@@ -12,7 +12,12 @@
       "Bash(export:*)",
       "Bash(source:*)",
       "Bash(idf.py build:*)",
-      "Bash(C:/Espressif/tools/python/v5.5.2/venv/Scripts/python.exe C:/esp/v5.5.2/esp-idf/tools/idf.py --version)"
+      "Bash(C:/Espressif/tools/python/v5.5.2/venv/Scripts/python.exe C:/esp/v5.5.2/esp-idf/tools/idf.py --version)",
+      "WebFetch(domain:files.waveshare.com)",
+      "WebFetch(domain:components.espressif.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(pdftotext:*)",
+      "Bash(\"C:\\\\Espressif\\\\tools\\\\riscv32-esp-elf\\\\esp-14.2.0_20251107\\\\riscv32-esp-elf\\\\bin\\\\riscv32-esp-elf-addr2line.exe\" -e \"d:\\\\1.- Personal Proyects\\\\Firmware Walkman\\\\APP\\\\Lyra\\\\build\\\\lyra.elf\" -f 0x4001094e 0x40010938)"
     ]
   }
 }

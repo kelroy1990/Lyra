@@ -2,6 +2,7 @@
 build/
 out/
 APP/Lyra/components/esp/
+nul
 
 # IDE
 .vscode/
