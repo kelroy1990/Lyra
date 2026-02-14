@@ -16,22 +16,31 @@ enum {
     ITF_NUM_TOTAL
 };
 
-// Total descriptor length for UAC2 stereo speaker with feedback EP
-#define TUD_AUDIO_SPEAKER_STEREO_FB_DESC_LEN (  \
-    TUD_AUDIO20_DESC_IAD_LEN                     \
-  + TUD_AUDIO20_DESC_STD_AC_LEN                  \
-  + TUD_AUDIO20_DESC_CS_AC_LEN                   \
-  + TUD_AUDIO20_DESC_CLK_SRC_LEN                 \
-  + TUD_AUDIO20_DESC_INPUT_TERM_LEN              \
-  + TUD_AUDIO20_DESC_OUTPUT_TERM_LEN             \
-  + TUD_AUDIO20_DESC_FEATURE_UNIT_LEN(2)         \
-  + TUD_AUDIO20_DESC_STD_AS_LEN                  \
-  + TUD_AUDIO20_DESC_STD_AS_LEN                  \
-  + TUD_AUDIO20_DESC_CS_AS_INT_LEN               \
-  + TUD_AUDIO20_DESC_TYPE_I_FORMAT_LEN           \
-  + TUD_AUDIO20_DESC_STD_AS_ISO_EP_LEN           \
-  + TUD_AUDIO20_DESC_CS_AS_ISO_EP_LEN            \
+// Total descriptor length for UAC2 stereo speaker with feedback EP and MULTIPLE FORMATS
+// Audio Control descriptors (shared)
+#define TUD_AUDIO_SPEAKER_AC_DESC_LEN ( \
+    TUD_AUDIO20_DESC_IAD_LEN            \
+  + TUD_AUDIO20_DESC_STD_AC_LEN         \
+  + TUD_AUDIO20_DESC_CS_AC_LEN          \
+  + TUD_AUDIO20_DESC_CLK_SRC_LEN        \
+  + TUD_AUDIO20_DESC_INPUT_TERM_LEN     \
+  + TUD_AUDIO20_DESC_OUTPUT_TERM_LEN    \
+  + TUD_AUDIO20_DESC_FEATURE_UNIT_LEN(2))
+
+// One streaming alternate setting (format-specific)
+#define TUD_AUDIO_SPEAKER_AS_ALT_DESC_LEN ( \
+    TUD_AUDIO20_DESC_STD_AS_LEN             \
+  + TUD_AUDIO20_DESC_CS_AS_INT_LEN          \
+  + TUD_AUDIO20_DESC_TYPE_I_FORMAT_LEN      \
+  + TUD_AUDIO20_DESC_STD_AS_ISO_EP_LEN      \
+  + TUD_AUDIO20_DESC_CS_AS_ISO_EP_LEN       \
   + TUD_AUDIO20_DESC_STD_AS_ISO_FB_EP_LEN)
+
+// Total: AC + Alt0 (zero-bandwidth) + Alt1 (16-bit) + Alt2 (24-bit) + Alt3 (32-bit)
+#define TUD_AUDIO_SPEAKER_STEREO_FB_MULTI_DESC_LEN ( \
+    TUD_AUDIO_SPEAKER_AC_DESC_LEN                    \
+  + TUD_AUDIO20_DESC_STD_AS_LEN                      \
+  + (TUD_AUDIO_SPEAKER_AS_ALT_DESC_LEN * 3))
 
 // UAC2 Stereo Speaker with Feedback EP descriptor macro
 #define TUD_AUDIO_SPEAKER_STEREO_FB_DESCRIPTOR(_itfnum, _stridx, _nBytesPerSample, _nBitsUsedPerSample, _epout, _epoutsize, _epfb, _epfbsize) \
@@ -81,5 +90,79 @@ enum {
     /*_lockdelayunit*/ AUDIO20_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_MILLISEC, /*_lockdelay*/ 0x0001),\
   /* Standard AS Isochronous Feedback Endpoint Descriptor(4.10.2.1) */\
   TUD_AUDIO20_DESC_STD_AS_ISO_FB_EP(/*_ep*/ _epfb, /*_epsize*/ _epfbsize, /*_interval*/ TUD_OPT_HIGH_SPEED ? 4 : 1)
+
+// UAC2 Stereo Speaker with MULTIPLE FORMATS (16/24/32-bit) and Feedback EP
+#define TUD_AUDIO_SPEAKER_STEREO_FB_MULTI_DESCRIPTOR(_itfnum, _stridx, _epout, _epfb) \
+  /* Standard Interface Association Descriptor (IAD) */\
+  TUD_AUDIO20_DESC_IAD(/*_firstitf*/ _itfnum, /*_nitfs*/ 0x02, /*_stridx*/ 0x00),\
+  /* Standard AC Interface Descriptor(4.7.1) */\
+  TUD_AUDIO20_DESC_STD_AC(/*_itfnum*/ _itfnum, /*_nEPs*/ 0x00, /*_stridx*/ _stridx),\
+  /* Class-Specific AC Interface Header Descriptor(4.7.2) */\
+  TUD_AUDIO20_DESC_CS_AC(/*_bcdADC*/ 0x0200, /*_category*/ AUDIO20_FUNC_DESKTOP_SPEAKER, \
+    /*_totallen*/ TUD_AUDIO20_DESC_CLK_SRC_LEN + TUD_AUDIO20_DESC_INPUT_TERM_LEN + TUD_AUDIO20_DESC_OUTPUT_TERM_LEN + TUD_AUDIO20_DESC_FEATURE_UNIT_LEN(2), \
+    /*_ctrl*/ AUDIO20_CS_AS_INTERFACE_CTRL_LATENCY_POS),\
+  /* Clock Source Descriptor(4.7.2.1) */\
+  TUD_AUDIO20_DESC_CLK_SRC(/*_clkid*/ UAC2_ENTITY_CLOCK, /*_attr*/ AUDIO20_CLOCK_SOURCE_ATT_INT_PRO_CLK, \
+    /*_ctrl*/ (AUDIO20_CTRL_RW << AUDIO20_CLOCK_SOURCE_CTRL_CLK_FRQ_POS), \
+    /*_assocTerm*/ UAC2_ENTITY_INPUT_TERMINAL, /*_stridx*/ 0x00),\
+  /* Input Terminal Descriptor(4.7.2.4) */\
+  TUD_AUDIO20_DESC_INPUT_TERM(/*_termid*/ UAC2_ENTITY_INPUT_TERMINAL, /*_termtype*/ AUDIO_TERM_TYPE_USB_STREAMING, \
+    /*_assocTerm*/ 0x00, /*_clkid*/ UAC2_ENTITY_CLOCK, /*_nchannelslogical*/ 0x02, \
+    /*_channelcfg*/ AUDIO20_CHANNEL_CONFIG_NON_PREDEFINED, /*_idxchannelnames*/ 0x00, \
+    /*_ctrl*/ 0x0000, /*_stridx*/ 0x00),\
+  /* Output Terminal Descriptor(4.7.2.5) */\
+  TUD_AUDIO20_DESC_OUTPUT_TERM(/*_termid*/ UAC2_ENTITY_OUTPUT_TERMINAL, /*_termtype*/ AUDIO_TERM_TYPE_OUT_DESKTOP_SPEAKER, \
+    /*_assocTerm*/ UAC2_ENTITY_INPUT_TERMINAL, /*_srcid*/ UAC2_ENTITY_FEATURE_UNIT, \
+    /*_clkid*/ UAC2_ENTITY_CLOCK, /*_ctrl*/ 0x0000, /*_stridx*/ 0x00),\
+  /* Feature Unit Descriptor(4.7.2.8) */\
+  TUD_AUDIO20_DESC_FEATURE_UNIT(/*_unitid*/ UAC2_ENTITY_FEATURE_UNIT, /*_srcid*/ UAC2_ENTITY_INPUT_TERMINAL, /*_stridx*/ 0x00, \
+    /*_ctrlch0master*/ (AUDIO20_CTRL_RW << AUDIO20_FEATURE_UNIT_CTRL_MUTE_POS) | (AUDIO20_CTRL_RW << AUDIO20_FEATURE_UNIT_CTRL_VOLUME_POS), \
+    /*_ctrlch1*/       (AUDIO20_CTRL_RW << AUDIO20_FEATURE_UNIT_CTRL_MUTE_POS) | (AUDIO20_CTRL_RW << AUDIO20_FEATURE_UNIT_CTRL_VOLUME_POS), \
+    /*_ctrlch2*/       (AUDIO20_CTRL_RW << AUDIO20_FEATURE_UNIT_CTRL_MUTE_POS) | (AUDIO20_CTRL_RW << AUDIO20_FEATURE_UNIT_CTRL_VOLUME_POS)),\
+  \
+  /* ===== ALTERNATE SETTING 0: Zero Bandwidth ===== */\
+  TUD_AUDIO20_DESC_STD_AS_INT(/*_itfnum*/ (uint8_t)((_itfnum) + 1), /*_altset*/ 0x00, /*_nEPs*/ 0x00, /*_stridx*/ 0x00),\
+  \
+  /* ===== ALTERNATE SETTING 1: 16-bit Stereo ===== */\
+  TUD_AUDIO20_DESC_STD_AS_INT(/*_itfnum*/ (uint8_t)((_itfnum) + 1), /*_altset*/ 0x01, /*_nEPs*/ 0x02, /*_stridx*/ 0x00),\
+  TUD_AUDIO20_DESC_CS_AS_INT(/*_termid*/ UAC2_ENTITY_INPUT_TERMINAL, /*_ctrl*/ AUDIO20_CTRL_NONE, \
+    /*_formattype*/ AUDIO20_FORMAT_TYPE_I, /*_formats*/ AUDIO20_DATA_FORMAT_TYPE_I_PCM, \
+    /*_nchannelsphysical*/ 0x02, /*_channelcfg*/ AUDIO20_CHANNEL_CONFIG_NON_PREDEFINED, /*_stridx*/ 0x00),\
+  TUD_AUDIO20_DESC_TYPE_I_FORMAT(2, 16),\
+  TUD_AUDIO20_DESC_STD_AS_ISO_EP(/*_ep*/ _epout, \
+    /*_attr*/ (uint8_t)((uint8_t)TUSB_XFER_ISOCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_ASYNCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_DATA), \
+    /*_maxEPsize*/ ((CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE / 8000 + 1) * 2 * 2), /*_interval*/ 0x01),\
+  TUD_AUDIO20_DESC_CS_AS_ISO_EP(/*_attr*/ AUDIO20_CS_AS_ISO_DATA_EP_ATT_NON_MAX_PACKETS_OK, \
+    /*_ctrl*/ AUDIO20_CTRL_NONE, \
+    /*_lockdelayunit*/ AUDIO20_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_MILLISEC, /*_lockdelay*/ 0x0001),\
+  TUD_AUDIO20_DESC_STD_AS_ISO_FB_EP(/*_ep*/ _epfb, /*_epsize*/ 4, /*_interval*/ TUD_OPT_HIGH_SPEED ? 4 : 1),\
+  \
+  /* ===== ALTERNATE SETTING 2: 24-bit Stereo (in 32-bit container) ===== */\
+  TUD_AUDIO20_DESC_STD_AS_INT(/*_itfnum*/ (uint8_t)((_itfnum) + 1), /*_altset*/ 0x02, /*_nEPs*/ 0x02, /*_stridx*/ 0x00),\
+  TUD_AUDIO20_DESC_CS_AS_INT(/*_termid*/ UAC2_ENTITY_INPUT_TERMINAL, /*_ctrl*/ AUDIO20_CTRL_NONE, \
+    /*_formattype*/ AUDIO20_FORMAT_TYPE_I, /*_formats*/ AUDIO20_DATA_FORMAT_TYPE_I_PCM, \
+    /*_nchannelsphysical*/ 0x02, /*_channelcfg*/ AUDIO20_CHANNEL_CONFIG_NON_PREDEFINED, /*_stridx*/ 0x00),\
+  TUD_AUDIO20_DESC_TYPE_I_FORMAT(4, 24),\
+  TUD_AUDIO20_DESC_STD_AS_ISO_EP(/*_ep*/ _epout, \
+    /*_attr*/ (uint8_t)((uint8_t)TUSB_XFER_ISOCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_ASYNCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_DATA), \
+    /*_maxEPsize*/ ((CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE / 8000 + 1) * 4 * 2), /*_interval*/ 0x01),\
+  TUD_AUDIO20_DESC_CS_AS_ISO_EP(/*_attr*/ AUDIO20_CS_AS_ISO_DATA_EP_ATT_NON_MAX_PACKETS_OK, \
+    /*_ctrl*/ AUDIO20_CTRL_NONE, \
+    /*_lockdelayunit*/ AUDIO20_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_MILLISEC, /*_lockdelay*/ 0x0001),\
+  TUD_AUDIO20_DESC_STD_AS_ISO_FB_EP(/*_ep*/ _epfb, /*_epsize*/ 4, /*_interval*/ TUD_OPT_HIGH_SPEED ? 4 : 1),\
+  \
+  /* ===== ALTERNATE SETTING 3: 32-bit Stereo ===== */\
+  TUD_AUDIO20_DESC_STD_AS_INT(/*_itfnum*/ (uint8_t)((_itfnum) + 1), /*_altset*/ 0x03, /*_nEPs*/ 0x02, /*_stridx*/ 0x00),\
+  TUD_AUDIO20_DESC_CS_AS_INT(/*_termid*/ UAC2_ENTITY_INPUT_TERMINAL, /*_ctrl*/ AUDIO20_CTRL_NONE, \
+    /*_formattype*/ AUDIO20_FORMAT_TYPE_I, /*_formats*/ AUDIO20_DATA_FORMAT_TYPE_I_PCM, \
+    /*_nchannelsphysical*/ 0x02, /*_channelcfg*/ AUDIO20_CHANNEL_CONFIG_NON_PREDEFINED, /*_stridx*/ 0x00),\
+  TUD_AUDIO20_DESC_TYPE_I_FORMAT(4, 32),\
+  TUD_AUDIO20_DESC_STD_AS_ISO_EP(/*_ep*/ _epout, \
+    /*_attr*/ (uint8_t)((uint8_t)TUSB_XFER_ISOCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_ASYNCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_DATA), \
+    /*_maxEPsize*/ ((CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE / 8000 + 1) * 4 * 2), /*_interval*/ 0x01),\
+  TUD_AUDIO20_DESC_CS_AS_ISO_EP(/*_attr*/ AUDIO20_CS_AS_ISO_DATA_EP_ATT_NON_MAX_PACKETS_OK, \
+    /*_ctrl*/ AUDIO20_CTRL_NONE, \
+    /*_lockdelayunit*/ AUDIO20_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_MILLISEC, /*_lockdelay*/ 0x0001),\
+  TUD_AUDIO20_DESC_STD_AS_ISO_FB_EP(/*_ep*/ _epfb, /*_epsize*/ 4, /*_interval*/ TUD_OPT_HIGH_SPEED ? 4 : 1)
 
 #endif

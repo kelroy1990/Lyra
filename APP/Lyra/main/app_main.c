@@ -269,12 +269,25 @@ static void codec_init(void)
 // I2S Output
 //--------------------------------------------------------------------+
 
-static void i2s_output_init(uint32_t sample_rate)
+static void i2s_output_init(uint32_t sample_rate, uint8_t bits_per_sample)
 {
     if (i2s_tx) {
         i2s_channel_disable(i2s_tx);
         i2s_del_channel(i2s_tx);
         i2s_tx = NULL;
+    }
+
+    // Map bits_per_sample to I2S data bit width
+    i2s_data_bit_width_t i2s_bits;
+    switch (bits_per_sample) {
+        case 16: i2s_bits = I2S_DATA_BIT_WIDTH_16BIT; break;
+        case 24: i2s_bits = I2S_DATA_BIT_WIDTH_32BIT; break;  // 24-bit in 32-bit container
+        case 32: i2s_bits = I2S_DATA_BIT_WIDTH_32BIT; break;
+        default:
+            ESP_LOGE(TAG, "Invalid bits_per_sample: %d, using 32-bit", bits_per_sample);
+            i2s_bits = I2S_DATA_BIT_WIDTH_32BIT;
+            bits_per_sample = 32;
+            break;
     }
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
@@ -289,7 +302,7 @@ static void i2s_output_init(uint32_t sample_rate)
             .clk_src = I2S_CLK_SRC_APLL,
             .mclk_multiple = I2S_MCLK_MULTIPLE_256,
         },
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(i2s_bits, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = I2S_MCLK_PIN,
             .bclk = I2S_BCLK_PIN,
@@ -302,17 +315,18 @@ static void i2s_output_init(uint32_t sample_rate)
 
     esp_err_t ret = i2s_channel_init_std_mode(i2s_tx, &std_cfg);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2S init failed for %lu Hz (err 0x%x), falling back to 48000 Hz", sample_rate, ret);
+        ESP_LOGE(TAG, "I2S init failed for %lu Hz, %d-bit (err 0x%x), falling back to 48000 Hz, 32-bit",
+                 sample_rate, bits_per_sample, ret);
         i2s_del_channel(i2s_tx);
         i2s_tx = NULL;
-        if (sample_rate != 48000) {
-            i2s_output_init(48000);
+        if (sample_rate != 48000 || bits_per_sample != 32) {
+            i2s_output_init(48000, 32);
         }
         return;
     }
     ESP_ERROR_CHECK(i2s_channel_enable(i2s_tx));
-    ESP_LOGI(TAG, "I2S output: %lu Hz, 32-bit stereo, MCLK=%luHz",
-             sample_rate, sample_rate * 256);
+    ESP_LOGI(TAG, "I2S output: %lu Hz, %d-bit stereo, MCLK=%luHz",
+             sample_rate, bits_per_sample, sample_rate * 256);
 }
 
 //--------------------------------------------------------------------+
@@ -323,8 +337,11 @@ static const uint32_t supported_sample_rates[] = { 44100, 48000, 88200, 96000, 1
 #define N_SAMPLE_RATES  (sizeof(supported_sample_rates) / sizeof(supported_sample_rates[0]))
 
 static uint32_t current_sample_rate = 48000;
+static uint8_t  current_bits_per_sample = 32;  // Current format: 16, 24, or 32-bit
+static uint8_t  current_alt_setting = 0;       // Current alternate setting (0=none, 1=16bit, 2=24bit, 3=32bit)
 static int32_t  current_volume[3]   = {0, 0, 0};
 static bool     current_mute[3]     = {false, false, false};
+static volatile bool format_changed = false;
 
 bool tud_audio_rx_done_pre_read(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting)
 {
@@ -335,7 +352,45 @@ bool tud_audio_rx_done_pre_read(uint8_t rhport, uint16_t n_bytes_received, uint8
 // NOTE: All callbacks below can run in ISR context (DWC2 slave mode)
 bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_request)
 {
-    (void)rhport; (void)p_request;
+    (void)rhport;
+
+    uint8_t const itf = tu_u16_low(p_request->wIndex);
+    uint8_t const alt = tu_u16_low(p_request->wValue);
+
+    ESP_LOGI(TAG, "[USB DEBUG] SET_INTERFACE: itf=%d, alt=%d, bmRequestType=0x%02x, bRequest=0x%02x",
+             itf, alt, p_request->bmRequestType, p_request->bRequest);
+
+    // Only handle audio streaming interface (ITF_NUM_AUDIO_STREAMING)
+    if (itf == ITF_NUM_AUDIO_STREAMING) {
+        // Map alternate setting to bit depth:
+        // Alt 0 = No streaming (zero bandwidth)
+        // Alt 1 = 16-bit
+        // Alt 2 = 24-bit (in 32-bit container)
+        // Alt 3 = 32-bit
+
+        uint8_t new_bits = 0;
+        const char *format_str = "";
+        switch (alt) {
+            case 0:  new_bits = 0;  format_str = "No streaming"; break;
+            case 1:  new_bits = 16; format_str = "16-bit"; break;
+            case 2:  new_bits = 24; format_str = "24-bit"; break;
+            case 3:  new_bits = 32; format_str = "32-bit"; break;
+            default:
+                ESP_LOGE(TAG, "[USB] Invalid alternate setting: %d", alt);
+                return false;
+        }
+
+        if (alt != current_alt_setting) {
+            ESP_LOGI(TAG, "[USB] Host changed format: Alt %d -> Alt %d (%s)",
+                     current_alt_setting, alt, format_str);
+            current_alt_setting = alt;
+            current_bits_per_sample = new_bits;
+            format_changed = true;
+        }
+    } else {
+        ESP_LOGI(TAG, "[USB DEBUG] SET_INTERFACE for other interface: itf=%d (not audio streaming)", itf);
+    }
+
     return true;
 }
 
@@ -353,47 +408,70 @@ bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
     uint8_t ctrlSel    = TU_U16_HIGH(p_request->wValue);
     uint8_t entityID   = TU_U16_HIGH(p_request->wIndex);
 
+    ESP_LOGI(TAG, "[USB DEBUG] GET_REQ_ENTITY: entity=0x%02x, ctrl=0x%02x, ch=%d, req=0x%02x, wLen=%d",
+             entityID, ctrlSel, channelNum, p_request->bRequest, p_request->wLength);
+
     if (entityID == UAC2_ENTITY_CLOCK) {
         if (ctrlSel == AUDIO20_CS_CTRL_SAM_FREQ) {
             if (p_request->bRequest == AUDIO20_CS_REQ_CUR) {
+                ESP_LOGI(TAG, "[USB] Host requests CURRENT sample rate: %lu Hz", current_sample_rate);
                 audio20_control_cur_4_t freq = { .bCur = tu_htole32(current_sample_rate) };
                 return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &freq, sizeof(freq));
             } else if (p_request->bRequest == AUDIO20_CS_REQ_RANGE) {
+                ESP_LOGI(TAG, "[USB] Host requests RANGE of sample rates (%d rates)", N_SAMPLE_RATES);
                 audio20_control_range_4_n_t(8) freq_range;
                 freq_range.wNumSubRanges = tu_htole16(N_SAMPLE_RATES);
                 for (uint8_t i = 0; i < N_SAMPLE_RATES; i++) {
                     freq_range.subrange[i].bMin = tu_htole32(supported_sample_rates[i]);
                     freq_range.subrange[i].bMax = tu_htole32(supported_sample_rates[i]);
                     freq_range.subrange[i].bRes = 0;
+                    ESP_LOGI(TAG, "  -> Rate %d: %lu Hz", i, supported_sample_rates[i]);
                 }
                 return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &freq_range, sizeof(freq_range));
+            } else {
+                ESP_LOGW(TAG, "[USB] Unhandled CLOCK request: 0x%02x", p_request->bRequest);
             }
         } else if (ctrlSel == AUDIO20_CS_CTRL_CLK_VALID) {
+            ESP_LOGI(TAG, "[USB] Host requests CLOCK VALID status");
             audio20_control_cur_1_t valid = { .bCur = 1 };
             return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &valid, sizeof(valid));
+        } else {
+            ESP_LOGW(TAG, "[USB] Unhandled CLOCK control: 0x%02x", ctrlSel);
         }
     }
 
     if (entityID == UAC2_ENTITY_FEATURE_UNIT) {
         if (ctrlSel == AUDIO20_FU_CTRL_MUTE) {
             if (p_request->bRequest == AUDIO20_CS_REQ_CUR) {
+                ESP_LOGI(TAG, "[USB] Host requests MUTE status for ch=%d", channelNum);
                 audio20_control_cur_1_t mute = { .bCur = current_mute[channelNum] };
                 return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &mute, sizeof(mute));
+            } else {
+                ESP_LOGW(TAG, "[USB] Unhandled MUTE request: 0x%02x", p_request->bRequest);
             }
         } else if (ctrlSel == AUDIO20_FU_CTRL_VOLUME) {
             if (p_request->bRequest == AUDIO20_CS_REQ_CUR) {
+                ESP_LOGI(TAG, "[USB] Host requests VOLUME for ch=%d: %d", channelNum, current_volume[channelNum]);
                 audio20_control_cur_2_t vol = { .bCur = tu_htole16(current_volume[channelNum]) };
                 return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &vol, sizeof(vol));
             } else if (p_request->bRequest == AUDIO20_CS_REQ_RANGE) {
+                ESP_LOGI(TAG, "[USB] Host requests VOLUME RANGE");
                 audio20_control_range_2_n_t(1) vol_range = {
                     .wNumSubRanges = tu_htole16(1),
                     .subrange[0] = { .bMin = tu_htole16(-60 * 256), .bMax = tu_htole16(0), .bRes = tu_htole16(256) }
                 };
                 return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &vol_range, sizeof(vol_range));
+            } else {
+                ESP_LOGW(TAG, "[USB] Unhandled VOLUME request: 0x%02x", p_request->bRequest);
             }
+        } else {
+            ESP_LOGW(TAG, "[USB] Unhandled FEATURE_UNIT control: 0x%02x", ctrlSel);
         }
+    } else if (entityID != UAC2_ENTITY_CLOCK) {
+        ESP_LOGW(TAG, "[USB] Unhandled entity: 0x%02x", entityID);
     }
 
+    ESP_LOGW(TAG, "[USB] GET_REQ_ENTITY not handled - returning false");
     return false;
 }
 
@@ -405,13 +483,19 @@ bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
     uint8_t ctrlSel    = TU_U16_HIGH(p_request->wValue);
     uint8_t entityID   = TU_U16_HIGH(p_request->wIndex);
 
+    ESP_LOGI(TAG, "[USB DEBUG] SET_REQ_ENTITY: entity=0x%02x, ctrl=0x%02x, ch=%d, req=0x%02x, wLen=%d",
+             entityID, ctrlSel, channelNum, p_request->bRequest, p_request->wLength);
+
     if (entityID == UAC2_ENTITY_CLOCK) {
         if (ctrlSel == AUDIO20_CS_CTRL_SAM_FREQ) {
             TU_VERIFY(p_request->bRequest == AUDIO20_CS_REQ_CUR);
             uint32_t freq = tu_le32toh(((audio20_control_cur_4_t const *)buf)->bCur);
+            ESP_LOGI(TAG, "[USB] Host SET sample rate to: %lu Hz", freq);
             current_sample_rate = freq;
             rate_changed = true;
             return true;
+        } else {
+            ESP_LOGW(TAG, "[USB] Unhandled SET CLOCK control: 0x%02x", ctrlSel);
         }
     }
 
@@ -419,14 +503,21 @@ bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
         if (ctrlSel == AUDIO20_FU_CTRL_MUTE) {
             TU_VERIFY(p_request->bRequest == AUDIO20_CS_REQ_CUR);
             current_mute[channelNum] = ((audio20_control_cur_1_t const *)buf)->bCur;
+            ESP_LOGI(TAG, "[USB] Host SET MUTE for ch=%d: %d", channelNum, current_mute[channelNum]);
             return true;
         } else if (ctrlSel == AUDIO20_FU_CTRL_VOLUME) {
             TU_VERIFY(p_request->bRequest == AUDIO20_CS_REQ_CUR);
             current_volume[channelNum] = tu_le16toh(((audio20_control_cur_2_t const *)buf)->bCur);
+            ESP_LOGI(TAG, "[USB] Host SET VOLUME for ch=%d: %d", channelNum, current_volume[channelNum]);
             return true;
+        } else {
+            ESP_LOGW(TAG, "[USB] Unhandled SET FEATURE_UNIT control: 0x%02x", ctrlSel);
         }
+    } else if (entityID != UAC2_ENTITY_CLOCK) {
+        ESP_LOGW(TAG, "[USB] Unhandled SET entity: 0x%02x", entityID);
     }
 
+    ESP_LOGW(TAG, "[USB] SET_REQ_ENTITY not handled - returning false");
     return false;
 }
 
@@ -449,15 +540,28 @@ static void audio_task(void *arg)
     uint32_t last_log_tick = 0;
 
     while (1) {
-        // Handle sample rate change from host
-        if (rate_changed) {
-            rate_changed = false;
-            ESP_LOGI(TAG, "Rate change requested: %lu Hz", current_sample_rate);
-            i2s_output_init(current_sample_rate);
+        // Handle sample rate OR format change from host
+        if (rate_changed || format_changed) {
+            if (rate_changed) {
+                ESP_LOGI(TAG, "Rate change requested: %lu Hz", current_sample_rate);
+                rate_changed = false;
+            }
+            if (format_changed) {
+                ESP_LOGI(TAG, "Format change requested: %d-bit", current_bits_per_sample);
+                format_changed = false;
+            }
+            // Reconfigure ONLY I2S with new settings (only if streaming is active)
+            if (current_bits_per_sample > 0) {  // Only if streaming is active (alt != 0)
+                i2s_output_init(current_sample_rate, current_bits_per_sample);
+                ESP_LOGI(TAG, "Audio format reconfigured: %lu Hz, %d-bit",
+                         current_sample_rate, current_bits_per_sample);
+                // Note: ES8311 DAC initialized with 32-bit can handle 16/24/32-bit without reconfiguration
+            }
         }
 
         uint16_t available = tud_audio_available();
         if (available > 0) {
+            // Data available: process it immediately
             uint16_t to_read = (available < sizeof(spk_buf)) ? available : sizeof(spk_buf);
             uint16_t n_read = tud_audio_read(spk_buf, to_read);
             if (n_read > 0 && i2s_tx) {
@@ -466,17 +570,21 @@ static void audio_task(void *arg)
                 total_bytes += bytes_written;
             }
         } else {
-            vTaskDelay(1);
+            // No data: yield CPU to IDLE1 task
+            // This task runs on CPU 1 (dedicated), so it won't interfere with
+            // IDLE0 watchdog on CPU 0. Simple taskYIELD() provides minimum latency
+            // while still allowing IDLE1 to run for watchdog reset.
+            taskYIELD();
         }
 
-        // Log audio stats every 2 seconds
-        uint32_t now = xTaskGetTickCount();
-        if (now - last_log_tick >= pdMS_TO_TICKS(2000)) {
-            ESP_LOGI(TAG, "Audio: %lu bytes written to I2S, i2s_tx=%s",
-                     total_bytes, i2s_tx ? "OK" : "NULL");
-            total_bytes = 0;
-            last_log_tick = now;
-        }
+        // // Log audio stats every 2 seconds
+        // uint32_t now = xTaskGetTickCount();
+        // if (now - last_log_tick >= pdMS_TO_TICKS(2000)) {
+            // ESP_LOGI(TAG, "Audio: %lu bytes written to I2S, i2s_tx=%s",
+                    //  total_bytes, i2s_tx ? "OK" : "NULL");
+        //     total_bytes = 0;
+        //     last_log_tick = now;
+        // }
     }
 }
 
@@ -502,7 +610,12 @@ static void cdc_task(void *arg)
 
 void tud_mount_cb(void)
 {
-    ESP_LOGI(TAG, "USB device mounted");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "USB device MOUNTED - Windows should now detect audio device");
+    ESP_LOGI(TAG, "Supported formats:");
+    ESP_LOGI(TAG, "  - 32-bit stereo");
+    ESP_LOGI(TAG, "  - Sample rates: 44.1, 48, 88.2, 96, 176.4, 192 kHz");
+    ESP_LOGI(TAG, "========================================");
 }
 
 void tud_umount_cb(void)
@@ -521,8 +634,8 @@ void app_main(void)
     // 1. I2C bus
     i2c_bus_init();
 
-    // 2. I2S output at default 48kHz (provides MCLK/BCLK/LRCK to codec)
-    i2s_output_init(48000);
+    // 2. I2S output at default 48kHz, 32-bit (provides MCLK/BCLK/LRCK to codec)
+    i2s_output_init(48000, 32);
 
     // 3. ES8311 codec via esp_codec_dev (handles all register setup + PA)
     codec_init();
@@ -542,10 +655,17 @@ void app_main(void)
     }
     ESP_LOGI(TAG, "TinyUSB initialized (HS, UAC2 + CDC)");
 
+    // Small delay to allow Windows to properly enumerate the device
+    ESP_LOGI(TAG, "Waiting for USB enumeration...");
+    vTaskDelay(pdMS_TO_TICKS(500));
+
     // 5. Tasks
+    // CPU 0: USB stack (TinyUSB), CDC, and system tasks
     xTaskCreatePinnedToCore(tusb_device_task, "TinyUSB", 16384, NULL, 5, NULL, 0);
-    xTaskCreatePinnedToCore(audio_task, "audio", 8192, NULL, 4, NULL, 0);
     xTaskCreatePinnedToCore(cdc_task, "cdc", 4096, NULL, 3, NULL, 0);
+
+    // CPU 1: Dedicated audio processing for minimum latency
+    xTaskCreatePinnedToCore(audio_task, "audio", 8192, NULL, 4, NULL, 1);
 
     ESP_LOGI(TAG, "Lyra ready - USB Audio 2.0 -> ES8311 DAC");
 }

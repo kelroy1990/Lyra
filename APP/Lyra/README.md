@@ -307,6 +307,7 @@ A 384 kHz/32-bit/stereo: `(384000/8000 + 1) * 4 * 2 = 392 bytes` por microframe 
 
 ### 4.2 Formatos Soportados
 
+@TODO Agregar los de 24 y 16.
 | Sample Rate | Bit Depth | Canales | MCLK        | Ancho Banda USB |
 |-------------|-----------|---------|-------------|-----------------|
 | 44,100 Hz   | 32-bit    | Stereo  | 6.144 MHz   | 2.82 Mbps       |
@@ -432,16 +433,17 @@ microSD Decoder ──┘         |
 
 | Fase | Nombre                    | Componentes              | Estado       |
 |------|---------------------------|--------------------------|--------------|
-| F0   | Estructura del proyecto   | Todos (placeholder)      | Completado   |
-| F1   | I2S output a ES9039Q2M    | audio_pipeline           | Pendiente    |
-| F2   | Display & UI base         | display, ui              | Pendiente    |
-| F3   | EQ / DSP                  | audio_pipeline           | Pendiente    |
-| F4   | Gestion de energia        | power, sensors           | Pendiente    |
-| F5   | Controles fisicos         | input                    | Pendiente    |
-| F6   | Reproduccion microSD      | storage, audio_codecs    | Pendiente    |
-| F7   | Wireless ESP32-C5         | wireless                 | Pendiente    |
-| F8   | UI avanzada               | ui                       | Pendiente    |
-| F9   | Polish y features avanzados| Todos                   | Pendiente    |
+| F0   | Estructura del proyecto   | Todos (placeholder)      | ✅ Completado |
+| F0.5 | USB Audio (UAC2+CDC)      | usb_device, TinyUSB      | ✅ Completado |
+| F1   | I2S output a ES9039Q2M    | audio_pipeline           | 🟡 Temporal (ES8311) |
+| F2   | Display & UI base         | display, ui              | ⏸️ Pendiente  |
+| F3   | EQ / DSP                  | audio_pipeline           | 🔄 En planificación |
+| F4   | Gestion de energia        | power, sensors           | ⏸️ Pendiente  |
+| F5   | Controles fisicos         | input                    | ⏸️ Pendiente  |
+| F6   | Reproduccion microSD      | storage, audio_codecs    | ⏸️ Pendiente  |
+| F7   | Wireless ESP32-C5         | wireless                 | ⏸️ Pendiente  |
+| F8   | UI avanzada               | ui                       | ⏸️ Pendiente  |
+| F9   | Polish y features avanzados| Todos                   | ⏸️ Pendiente  |
 
 ### F0 - Estructura del Proyecto (completado)
 - Renombrar `hello_world_main.c` -> `app_main.c`

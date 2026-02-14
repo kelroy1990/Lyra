@@ -44,11 +44,12 @@ extern "C" {
 // Audio Class Driver Configuration (UAC2 Stereo Speaker)
 //--------------------------------------------------------------------
 
-// Audio format: 32-bit stereo, up to 384kHz
+// Audio format: MULTI-FORMAT (16/24/32-bit) stereo, up to 384kHz
+// Note: Buffer sizes are configured for max format (32-bit @ 384kHz)
 #define CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE            384000
 #define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX              2
-#define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX      4
-#define CFG_TUD_AUDIO_FUNC_1_RESOLUTION_RX              32
+#define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX      4   // Max: 32-bit (4 bytes)
+#define CFG_TUD_AUDIO_FUNC_1_RESOLUTION_RX              32  // Max: 32-bit
 
 // HS isochronous EP size: microframe = 125us (bInterval=1)
 // samples/microframe = freq/8000, +1 for rounding
