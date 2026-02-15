@@ -1,6 +1,6 @@
-idf_component_register(SRCS "usb_msc.c" "app_main.c" "usb_descriptors.c"
+idf_component_register(SRCS "usb_msc.c" "usb_mode.c" "app_main.c" "usb_descriptors.c"
                        INCLUDE_DIRS "."
-                       PRIV_REQUIRES usb tinyusb esp_driver_i2s esp_driver_i2c esp_driver_gpio esp_codec_dev audio_pipeline storage)
+                       PRIV_REQUIRES usb tinyusb esp_timer esp_driver_i2s esp_driver_i2c esp_driver_gpio esp_codec_dev audio_pipeline storage)
 
 # Inject our tusb_config.h into TinyUSB's compilation so it finds our config
 idf_component_get_property(tusb_lib tinyusb COMPONENT_LIB)

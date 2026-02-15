@@ -11,7 +11,7 @@
 #include "ff.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "esp_task_wdt.h"
+#include "freertos/task.h"
 #if SOC_SDMMC_IO_POWER_EXTERNAL
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #endif
@@ -360,20 +360,39 @@ esp_err_t storage_get_info(uint64_t *total_bytes, uint64_t *free_bytes)
 // Format
 //--------------------------------------------------------------------+
 
-esp_err_t storage_format(uint32_t alloc_unit_size)
+//--------------------------------------------------------------------+
+// Format (runs on CPU1 to avoid WDT issues on large cards)
+//--------------------------------------------------------------------+
+
+typedef struct {
+    uint32_t alloc_unit_size;
+    volatile bool done;
+    volatile esp_err_t result;
+} format_params_t;
+
+// Internal format logic — runs on CPU1 task
+static void format_task(void *arg)
 {
+    format_params_t *p = (format_params_t *)arg;
+
     xSemaphoreTake(s_mutex, portMAX_DELAY);
 
     if (s_mode == STORAGE_MODE_USB_MSC) {
         ESP_LOGE(TAG, "Cannot format while USB MSC is active");
         xSemaphoreGive(s_mutex);
-        return ESP_ERR_INVALID_STATE;
+        p->result = ESP_ERR_INVALID_STATE;
+        p->done = true;
+        vTaskDelete(NULL);
+        return;
     }
 
     if (!s_card) {
         ESP_LOGE(TAG, "No SD card to format");
         xSemaphoreGive(s_mutex);
-        return ESP_ERR_INVALID_STATE;
+        p->result = ESP_ERR_INVALID_STATE;
+        p->done = true;
+        vTaskDelete(NULL);
+        return;
     }
 
     // Unmount if mounted
@@ -390,50 +409,46 @@ esp_err_t storage_format(uint32_t alloc_unit_size)
     if (!work_buf) {
         ff_diskio_register(SD_PDRV, NULL);
         xSemaphoreGive(s_mutex);
-        return ESP_ERR_NO_MEM;
+        p->result = ESP_ERR_NO_MEM;
+        p->done = true;
+        vTaskDelete(NULL);
+        return;
     }
 
-    // Suspend IDLE0 WDT monitoring — f_mkfs() is a single blocking call
-    // that can take >15s on large cards (60GB+)
-    esp_task_wdt_config_t wdt_cfg = {
-        .timeout_ms = 5000,
-        .idle_core_mask = 0,          // Stop monitoring IDLE tasks
-        .trigger_panic = false,
-    };
-    esp_task_wdt_reconfigure(&wdt_cfg);
-
     // Repartition: single partition using 100% of the card
+    // NOTE: No WDT workaround needed — this task runs on CPU1 which has
+    // no IDLE WDT monitoring (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is off)
     ESP_LOGI(TAG, "Creating single partition (100%% of card)...");
-    LBA_t plist[] = {100, 0, 0, 0};  // 100% in partition 0
+    LBA_t plist[] = {100, 0, 0, 0};
     FRESULT fres = f_fdisk(SD_PDRV, plist, work_buf);
     if (fres != FR_OK) {
         ESP_LOGE(TAG, "f_fdisk failed (FRESULT %d)", fres);
         free(work_buf);
         ff_diskio_register(SD_PDRV, NULL);
-        wdt_cfg.idle_core_mask = (1 << 0);
-        esp_task_wdt_reconfigure(&wdt_cfg);
         xSemaphoreGive(s_mutex);
-        return ESP_FAIL;
+        p->result = ESP_FAIL;
+        p->done = true;
+        vTaskDelete(NULL);
+        return;
     }
 
     // Format the new partition as FAT32
-    ESP_LOGI(TAG, "Formatting as FAT32 (alloc_unit=%lu)...", alloc_unit_size);
+    ESP_LOGI(TAG, "Formatting as FAT32 (alloc_unit=%lu)...", p->alloc_unit_size);
     const MKFS_PARM opt = {
         .fmt = FM_FAT32,
-        .au_size = alloc_unit_size,  // 0 = auto
+        .au_size = p->alloc_unit_size,
     };
     fres = f_mkfs(SD_DRV, &opt, work_buf, 4096);
     free(work_buf);
     ff_diskio_register(SD_PDRV, NULL);
 
-    // Restore IDLE0 WDT monitoring
-    wdt_cfg.idle_core_mask = (1 << 0);
-    esp_task_wdt_reconfigure(&wdt_cfg);
-
     if (fres != FR_OK) {
         ESP_LOGE(TAG, "Format failed (FRESULT %d)", fres);
         xSemaphoreGive(s_mutex);
-        return ESP_FAIL;
+        p->result = ESP_FAIL;
+        p->done = true;
+        vTaskDelete(NULL);
+        return;
     }
 
     ESP_LOGI(TAG, "Format complete, mounting...");
@@ -446,7 +461,31 @@ esp_err_t storage_format(uint32_t alloc_unit_size)
     }
 
     xSemaphoreGive(s_mutex);
-    return ret;
+    p->result = ret;
+    p->done = true;
+    vTaskDelete(NULL);
+}
+
+esp_err_t storage_format(uint32_t alloc_unit_size)
+{
+    static format_params_t params;
+    params.alloc_unit_size = alloc_unit_size;
+    params.done = false;
+    params.result = ESP_FAIL;
+
+    // Launch format on CPU1 (no IDLE WDT → safe for long operations)
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        format_task, "sd_fmt", 8192, &params, 3, NULL, 1);
+    if (ret != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Poll until done — yields CPU0 so display/CDC can update
+    while (!params.done) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    return params.result;
 }
 
 //--------------------------------------------------------------------+

@@ -22,12 +22,14 @@ extern "C" {
 #define CFG_TUSB_OS                 OPT_OS_FREERTOS
 #define CFG_TUSB_OS_INC_PATH        freertos/
 
-// DWC2 controller: Slave/IRQ mode
+// DWC2 controller: Slave/IRQ mode (ISR copies FIFO directly → best for isochronous audio)
+// Note: DMA mode breaks audio because tud_task() scheduling adds jitter to isochronous delivery
 #define CFG_TUD_DWC2_SLAVE_ENABLE   1
 
 #define CFG_TUSB_MEM_ALIGN          __attribute__((aligned(4)))
+
 #define CFG_TUD_ENDPOINT0_SIZE      64
-#define CFG_TUSB_DEBUG              0   // TU_LOG uses printf which aborts in ISR context
+#define CFG_TUSB_DEBUG              0
 
 //--------------------------------------------------------------------
 // Class Configuration
@@ -82,8 +84,9 @@ extern "C" {
 // MSC Class Driver Configuration
 //--------------------------------------------------------------------
 
-// Internal buffer for MSC transfers (larger = fewer SD card transactions)
-#define CFG_TUD_MSC_EP_BUFSIZE      4096
+// Internal buffer for MSC transfers (larger = fewer SD card transactions = higher throughput)
+// 32KB: 64 sectors per transaction (max allowed by TinyUSB MSC: < UINT16_MAX)
+#define CFG_TUD_MSC_EP_BUFSIZE      32768
 
 #ifdef __cplusplus
 }

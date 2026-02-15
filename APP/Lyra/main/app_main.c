@@ -21,6 +21,7 @@
 #include "usb_descriptors.h"
 #include "audio_pipeline.h"
 #include "storage.h"
+#include "usb_mode.h"
 #include "esp_heap_caps.h"
 
 static const char *TAG = "lyra";
@@ -367,8 +368,8 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_reques
     ESP_LOGI(TAG, "[USB DEBUG] SET_INTERFACE: itf=%d, alt=%d, bmRequestType=0x%02x, bRequest=0x%02x",
              itf, alt, p_request->bmRequestType, p_request->bRequest);
 
-    // Only handle audio streaming interface (ITF_NUM_AUDIO_STREAMING)
-    if (itf == ITF_NUM_AUDIO_STREAMING) {
+    // Only handle audio streaming interface
+    if (itf == ITF_AUDIO_AS) {
         // Map alternate setting to bit depth:
         // Alt 0 = No streaming (zero bandwidth)
         // Alt 1 = 16-bit
@@ -547,6 +548,12 @@ static void audio_task(void *arg)
     // uint32_t last_log_tick = 0;
 
     while (1) {
+        // Sleep when USB is not in audio mode (e.g. storage mode)
+        if (!audio_task_is_active()) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         // Handle sample rate OR format change from host
         if (rate_changed || format_changed) {
             if (rate_changed) {
@@ -924,50 +931,38 @@ static bool handle_sd_command(const char *cmd)
 {
     // Exact matches first
     if (strcmp(cmd, "sd") == 0) {
-        char msg[192];
-        const char *mode_str;
-        switch (storage_get_mode()) {
-            case STORAGE_MODE_LOCAL:   mode_str = "LOCAL (mounted)"; break;
-            case STORAGE_MODE_USB_MSC: mode_str = "USB MSC (host access)"; break;
-            default:                   mode_str = "NONE"; break;
-        }
+        const char *usb_str = (usb_mode_get() == USB_MODE_AUDIO) ? "AUDIO" : "STORAGE";
         if (storage_is_card_present() && storage_is_mounted()) {
             uint64_t total, free_space;
             storage_get_info(&total, &free_space);
-            snprintf(msg, sizeof(msg),
-                     "SD Card:\r\n  Card: present\r\n  Mode: %s\r\n  Size: %.1f MB\r\n  Free: %.1f MB\r\n",
-                     mode_str, total / (1024.0 * 1024.0), free_space / (1024.0 * 1024.0));
+            cdc_printf("SD Card:\r\n  Card: present\r\n  USB: %s\r\n  Size: %.1f MB\r\n  Free: %.1f MB\r\n",
+                       usb_str, total / (1024.0 * 1024.0), free_space / (1024.0 * 1024.0));
         } else if (storage_is_card_present()) {
-            snprintf(msg, sizeof(msg), "SD Card:\r\n  Card: present\r\n  Mode: %s\r\n", mode_str);
+            cdc_printf("SD Card:\r\n  Card: present\r\n  USB: %s\r\n", usb_str);
         } else {
-            snprintf(msg, sizeof(msg), "SD Card:\r\n  Card: not detected\r\n");
+            cdc_printf("SD Card:\r\n  Card: not detected\r\n");
         }
-        tud_cdc_write_str(msg);
-        tud_cdc_write_flush();
         return true;
     }
 
     if (strcmp(cmd, "sd msc") == 0) {
-        if (storage_is_msc_active()) {
-            cdc_printf("SD already in USB MSC mode\r\n");
+        if (usb_mode_get() == USB_MODE_STORAGE) {
+            cdc_printf("Already in storage mode\r\n");
+        } else if (!storage_is_card_present()) {
+            cdc_printf("No SD card detected\r\n");
         } else {
-            esp_err_t ret = storage_usb_msc_enable();
-            if (ret == ESP_OK) {
-                cdc_printf("SD card now visible as USB drive\r\n");
-                cdc_printf("Use 'sd eject' or Windows 'Safely Remove' to return\r\n");
-            } else {
-                cdc_printf("MSC enable failed: %s\r\n", esp_err_to_name(ret));
-            }
+            cdc_printf("Switching to storage mode...\r\n");
+            usb_mode_switch(USB_MODE_STORAGE);
         }
         return true;
     }
 
     if (strcmp(cmd, "sd eject") == 0) {
-        if (!storage_is_msc_active()) {
-            cdc_printf("SD is not in USB MSC mode\r\n");
+        if (usb_mode_get() == USB_MODE_AUDIO) {
+            cdc_printf("Already in audio mode\r\n");
         } else {
-            storage_usb_msc_disable();
-            cdc_printf("SD ejected from USB, remounted locally\r\n");
+            cdc_printf("Switching to audio mode...\r\n");
+            usb_mode_switch(USB_MODE_AUDIO);
         }
         return true;
     }
@@ -1044,7 +1039,19 @@ static bool handle_sd_command(const char *cmd)
         if (alloc > 0) cdc_printf(" (alloc=%luKB)", alloc / 1024);
         cdc_printf("...\r\n");
 
+        // Pause audio task so format_task can run on CPU1
+        bool was_active = audio_task_is_active();
+        if (was_active) {
+            audio_task_set_active(false);
+            vTaskDelay(pdMS_TO_TICKS(150));
+        }
+
         esp_err_t ret = storage_format(alloc);
+
+        if (was_active) {
+            audio_task_set_active(true);
+        }
+
         if (ret == ESP_OK) {
             cdc_printf("Format complete, SD card mounted\r\n");
         } else {
@@ -1071,12 +1078,8 @@ static void cdc_task(void *arg)
 
     while (1) {
         // Check for MSC eject (host "Safely Remove Hardware")
-        if (storage_msc_eject_pending()) {
-            storage_usb_msc_disable();
-            if (tud_cdc_connected()) {
-                tud_cdc_write_str("\r\n[SD card ejected from USB, remounted locally]\r\n> ");
-                tud_cdc_write_flush();
-            }
+        if (storage_msc_eject_pending() && usb_mode_get() == USB_MODE_STORAGE) {
+            usb_mode_switch(USB_MODE_AUDIO);
         }
 
         // Send initial prompt once CDC is connected
@@ -1127,8 +1130,8 @@ static void cdc_task(void *arg)
                         tud_cdc_write_str("  sd rm <file>  - Delete file\r\n");
                         tud_cdc_write_str("  sd rmdir <dir>- Delete empty dir\r\n");
                         tud_cdc_write_str("  sd mv <s> <d> - Move/rename\r\n");
-                        tud_cdc_write_str("  sd msc        - USB mass storage\r\n");
-                        tud_cdc_write_str("  sd eject      - Eject from USB\r\n");
+                        tud_cdc_write_str("  sd msc        - Switch to storage mode\r\n");
+                        tud_cdc_write_str("  sd eject      - Switch to audio mode\r\n");
                         tud_cdc_write_str("  sd part       - Show partitions\r\n");
                         tud_cdc_write_str("  sd format     - Repartition + FAT32\r\n");
                     } else if (strcmp(rx_buf, "flat") == 0) {
@@ -1207,12 +1210,8 @@ static void cdc_task(void *arg)
 
 void tud_mount_cb(void)
 {
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "USB device MOUNTED - Windows should now detect audio device");
-    ESP_LOGI(TAG, "Supported formats:");
-    ESP_LOGI(TAG, "  - 32-bit stereo");
-    ESP_LOGI(TAG, "  - Sample rates: 44.1, 48, 88.2, 96, 176.4, 192 kHz");
-    ESP_LOGI(TAG, "========================================");
+    const char *mode = (usb_mode_get() == USB_MODE_AUDIO) ? "AUDIO (UAC2+CDC)" : "STORAGE (MSC+CDC)";
+    ESP_LOGI(TAG, "USB device MOUNTED [%s]", mode);
 }
 
 void tud_umount_cb(void)
@@ -1274,6 +1273,7 @@ void app_main(void)
     ESP_LOGI(TAG, "Init USB PHY...");
     usb_phy_init();
     ESP_LOGI(TAG, "USB PHY OK, init TinyUSB...");
+    usb_mode_init(USB_MODE_AUDIO);
     tusb_rhport_init_t dev_init = {
         .role  = TUSB_ROLE_DEVICE,
         .speed = TUSB_SPEED_HIGH,
@@ -1282,7 +1282,7 @@ void app_main(void)
         ESP_LOGE(TAG, "TinyUSB init failed!");
         return;
     }
-    ESP_LOGI(TAG, "TinyUSB initialized (HS, UAC2 + CDC + MSC)");
+    ESP_LOGI(TAG, "TinyUSB initialized (HS, Audio mode: UAC2 + CDC)");
 
     // Small delay to allow Windows to properly enumerate the device
     ESP_LOGI(TAG, "Waiting for USB enumeration...");
@@ -1294,7 +1294,8 @@ void app_main(void)
     xTaskCreatePinnedToCore(cdc_task, "cdc", 4096, NULL, 3, NULL, 0);
 
     // CPU 1: Dedicated audio processing for minimum latency
-    xTaskCreatePinnedToCore(audio_task, "audio", 8192, NULL, 4, NULL, 1);
+    static TaskHandle_t audio_task_handle;
+    xTaskCreatePinnedToCore(audio_task, "audio", 8192, NULL, 4, &audio_task_handle, 1);
 
     ESP_LOGI(TAG, "Lyra ready - USB Audio 2.0 -> ES8311 DAC");
 }
