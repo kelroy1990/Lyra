@@ -7,12 +7,13 @@
 #define UAC2_ENTITY_FEATURE_UNIT    0x02
 #define UAC2_ENTITY_OUTPUT_TERMINAL 0x03
 
-// Interface numbers (Audio + CDC composite)
+// Interface numbers (Audio + CDC + MSC composite)
 enum {
     ITF_NUM_AUDIO_CONTROL = 0,
     ITF_NUM_AUDIO_STREAMING,
     ITF_NUM_CDC,
     ITF_NUM_CDC_DATA,
+    ITF_NUM_MSC,
     ITF_NUM_TOTAL
 };
 

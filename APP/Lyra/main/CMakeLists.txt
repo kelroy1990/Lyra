@@ -1,6 +1,6 @@
-idf_component_register(SRCS "app_main.c" "usb_descriptors.c"
+idf_component_register(SRCS "usb_msc.c" "app_main.c" "usb_descriptors.c"
                        INCLUDE_DIRS "."
-                       PRIV_REQUIRES usb tinyusb esp_driver_i2s esp_driver_i2c esp_driver_gpio esp_codec_dev audio_pipeline)
+                       PRIV_REQUIRES usb tinyusb esp_driver_i2s esp_driver_i2c esp_driver_gpio esp_codec_dev audio_pipeline storage)
 
 # Inject our tusb_config.h into TinyUSB's compilation so it finds our config
 idf_component_get_property(tusb_lib tinyusb COMPONENT_LIB)
@@ -11,4 +11,7 @@ target_include_directories(${tusb_lib} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(${COMPONENT_LIB} INTERFACE
     "-u tud_descriptor_device_cb"
     "-u tud_descriptor_configuration_cb"
-    "-u tud_descriptor_string_cb")
+    "-u tud_descriptor_string_cb"
+    "-u tud_msc_inquiry_cb"
+    "-u tud_msc_read10_cb"
+    "-u tud_msc_write10_cb")

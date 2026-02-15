@@ -26,10 +26,11 @@ set(includes_private
     "${TUSB_SRC}/src/device"
 )
 
-# Only the class drivers we actually use (Audio + CDC) + core stack
+# Class drivers we use: Audio + CDC + MSC
 set(srcs
     "${TUSB_SRC}/src/class/audio/audio_device.c"
     "${TUSB_SRC}/src/class/cdc/cdc_device.c"
+    "${TUSB_SRC}/src/class/msc/msc_device.c"
     # DWC2 portable driver (Synopsys, used by all ESP32 variants)
     "${TUSB_SRC}/src/portable/synopsys/dwc2/dcd_dwc2.c"
     "${TUSB_SRC}/src/portable/synopsys/dwc2/dwc2_common.c"

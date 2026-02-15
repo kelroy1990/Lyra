@@ -35,7 +35,7 @@ extern "C" {
 
 #define CFG_TUD_AUDIO               1
 #define CFG_TUD_CDC                 1
-#define CFG_TUD_MSC                 0
+#define CFG_TUD_MSC                 1
 #define CFG_TUD_HID                 0
 #define CFG_TUD_MIDI                0
 #define CFG_TUD_VENDOR              0
@@ -77,6 +77,13 @@ extern "C" {
 #define CFG_TUD_CDC_RX_BUFSIZE      512
 #define CFG_TUD_CDC_TX_BUFSIZE      512
 #define CFG_TUD_CDC_EP_BUFSIZE      512
+
+//--------------------------------------------------------------------
+// MSC Class Driver Configuration
+//--------------------------------------------------------------------
+
+// Internal buffer for MSC transfers (larger = fewer SD card transactions)
+#define CFG_TUD_MSC_EP_BUFSIZE      4096
 
 #ifdef __cplusplus
 }

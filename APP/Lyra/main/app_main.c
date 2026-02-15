@@ -1,5 +1,9 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/unistd.h>
 
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
@@ -16,6 +20,8 @@
 #include "tusb.h"
 #include "usb_descriptors.h"
 #include "audio_pipeline.h"
+#include "storage.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "lyra";
 
@@ -538,7 +544,7 @@ static void audio_task(void *arg)
     (void)arg;
     uint8_t spk_buf[CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX];
     uint32_t total_bytes = 0;
-    uint32_t last_log_tick = 0;
+    // uint32_t last_log_tick = 0;
 
     while (1) {
         // Handle sample rate OR format change from host
@@ -602,19 +608,477 @@ static void audio_task(void *arg)
 }
 
 //--------------------------------------------------------------------+
+// CDC helpers
+//--------------------------------------------------------------------+
+
+static void cdc_printf(const char *fmt, ...)
+{
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    tud_cdc_write_str(buf);
+    tud_cdc_write_flush();
+}
+
+// Build full path from user input (relative to /sdcard)
+static void sd_build_path(char *out, size_t out_size, const char *arg)
+{
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+        snprintf(out, out_size, "%s", STORAGE_MOUNT_POINT);
+    } else if (arg[0] == '/') {
+        snprintf(out, out_size, "%s%s", STORAGE_MOUNT_POINT, arg);
+    } else {
+        snprintf(out, out_size, "%s/%s", STORAGE_MOUNT_POINT, arg);
+    }
+}
+
+//--------------------------------------------------------------------+
+// SD card CLI commands
+//--------------------------------------------------------------------+
+
+static void sd_cmd_ls(const char *arg)
+{
+    if (!storage_is_mounted()) {
+        cdc_printf("SD not mounted\r\n");
+        return;
+    }
+    char path[160];
+    sd_build_path(path, sizeof(path), arg);
+
+    DIR *dir = opendir(path);
+    if (!dir) {
+        cdc_printf("Cannot open: %s\r\n", path + strlen(STORAGE_MOUNT_POINT));
+        return;
+    }
+
+    struct dirent *entry;
+    struct stat st;
+    char entry_path[420];
+    int count = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        snprintf(entry_path, sizeof(entry_path), "%s/%s", path, entry->d_name);
+        if (stat(entry_path, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                cdc_printf("  [DIR]          %s/\r\n", entry->d_name);
+            } else if (st.st_size >= 1024 * 1024) {
+                cdc_printf("  %8.1f MB   %s\r\n", st.st_size / (1024.0 * 1024.0), entry->d_name);
+            } else if (st.st_size >= 1024) {
+                cdc_printf("  %8.1f KB   %s\r\n", st.st_size / 1024.0, entry->d_name);
+            } else {
+                cdc_printf("  %8ld B    %s\r\n", (long)st.st_size, entry->d_name);
+            }
+        } else {
+            cdc_printf("  ???            %s\r\n", entry->d_name);
+        }
+        count++;
+    }
+    closedir(dir);
+    cdc_printf("  --- %d entries ---\r\n", count);
+}
+
+static void sd_cmd_tree_recurse(const char *path, int depth, const char *prefix)
+{
+    if (depth > 3) return;
+
+    DIR *dir = opendir(path);
+    if (!dir) return;
+
+    struct dirent *entry;
+    struct stat st;
+    char entry_path[420];
+
+    // Count entries first for formatting
+    int total = 0;
+    while (readdir(dir)) total++;
+    rewinddir(dir);
+
+    int idx = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        idx++;
+        bool last = (idx == total);
+        const char *connector = last ? "`-- " : "|-- ";
+
+        snprintf(entry_path, sizeof(entry_path), "%s/%s", path, entry->d_name);
+        bool is_dir = (stat(entry_path, &st) == 0 && S_ISDIR(st.st_mode));
+
+        if (is_dir) {
+            cdc_printf("%s%s%s/\r\n", prefix, connector, entry->d_name);
+            char new_prefix[128];
+            snprintf(new_prefix, sizeof(new_prefix), "%s%s", prefix, last ? "    " : "|   ");
+            sd_cmd_tree_recurse(entry_path, depth + 1, new_prefix);
+        } else {
+            cdc_printf("%s%s%s\r\n", prefix, connector, entry->d_name);
+        }
+    }
+    closedir(dir);
+}
+
+static void sd_cmd_tree(const char *arg)
+{
+    if (!storage_is_mounted()) {
+        cdc_printf("SD not mounted\r\n");
+        return;
+    }
+    char path[160];
+    sd_build_path(path, sizeof(path), arg);
+
+    const char *display = (*arg && *arg != ' ') ? arg : "/";
+    cdc_printf("%s\r\n", display);
+    sd_cmd_tree_recurse(path, 0, "");
+}
+
+static void sd_cmd_df(void)
+{
+    if (!storage_is_mounted()) {
+        cdc_printf("SD not mounted\r\n");
+        return;
+    }
+    uint64_t total, free_space;
+    if (storage_get_info(&total, &free_space) != ESP_OK) {
+        cdc_printf("Failed to get disk info\r\n");
+        return;
+    }
+    uint64_t used = total - free_space;
+    int pct = (total > 0) ? (int)(used * 100 / total) : 0;
+    cdc_printf("Disk usage:\r\n");
+    cdc_printf("  Total: %8.1f MB\r\n", total / (1024.0 * 1024.0));
+    cdc_printf("  Used:  %8.1f MB (%d%%)\r\n", used / (1024.0 * 1024.0), pct);
+    cdc_printf("  Free:  %8.1f MB\r\n", free_space / (1024.0 * 1024.0));
+}
+
+static void sd_cmd_mkdir(const char *arg)
+{
+    if (!storage_is_mounted()) { cdc_printf("SD not mounted\r\n"); return; }
+    if (*arg == '\0') { cdc_printf("Usage: sd mkdir <path>\r\n"); return; }
+    char path[160];
+    sd_build_path(path, sizeof(path), arg);
+    if (mkdir(path, 0775) == 0) {
+        cdc_printf("Created: %s\r\n", arg);
+    } else {
+        cdc_printf("mkdir failed\r\n");
+    }
+}
+
+static void sd_cmd_rm(const char *arg)
+{
+    if (!storage_is_mounted()) { cdc_printf("SD not mounted\r\n"); return; }
+    if (*arg == '\0') { cdc_printf("Usage: sd rm <file>\r\n"); return; }
+    char path[160];
+    sd_build_path(path, sizeof(path), arg);
+    if (unlink(path) == 0) {
+        cdc_printf("Deleted: %s\r\n", arg);
+    } else {
+        cdc_printf("rm failed (file not found or is directory)\r\n");
+    }
+}
+
+static void sd_cmd_rmdir(const char *arg)
+{
+    if (!storage_is_mounted()) { cdc_printf("SD not mounted\r\n"); return; }
+    if (*arg == '\0') { cdc_printf("Usage: sd rmdir <dir>\r\n"); return; }
+    char path[160];
+    sd_build_path(path, sizeof(path), arg);
+    if (rmdir(path) == 0) {
+        cdc_printf("Removed: %s\r\n", arg);
+    } else {
+        cdc_printf("rmdir failed (not empty or not found)\r\n");
+    }
+}
+
+static void sd_cmd_cat(const char *arg)
+{
+    if (!storage_is_mounted()) { cdc_printf("SD not mounted\r\n"); return; }
+    if (*arg == '\0') { cdc_printf("Usage: sd cat <file>\r\n"); return; }
+    char path[160];
+    sd_build_path(path, sizeof(path), arg);
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        cdc_printf("Cannot open: %s\r\n", arg);
+        return;
+    }
+    char line[128];
+    int total = 0;
+    while (fgets(line, sizeof(line), f) && total < 4096) {
+        // Convert \n to \r\n for terminal
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        cdc_printf("%s\r\n", line);
+        total += strlen(line);
+    }
+    if (total >= 4096) {
+        cdc_printf("--- truncated at 4KB ---\r\n");
+    }
+    fclose(f);
+}
+
+static void sd_cmd_mv(const char *arg)
+{
+    if (!storage_is_mounted()) { cdc_printf("SD not mounted\r\n"); return; }
+
+    // Parse "src dst" from arg
+    char src_arg[120], dst_arg[120];
+    if (sscanf(arg, "%119s %119s", src_arg, dst_arg) != 2) {
+        cdc_printf("Usage: sd mv <src> <dst>\r\n");
+        return;
+    }
+    char src_path[160], dst_path[160];
+    sd_build_path(src_path, sizeof(src_path), src_arg);
+    sd_build_path(dst_path, sizeof(dst_path), dst_arg);
+    if (rename(src_path, dst_path) == 0) {
+        cdc_printf("Moved: %s -> %s\r\n", src_arg, dst_arg);
+    } else {
+        cdc_printf("mv failed\r\n");
+    }
+}
+
+static void sd_cmd_part(void)
+{
+    if (!storage_is_card_present()) {
+        cdc_printf("No SD card detected\r\n");
+        return;
+    }
+
+    // Read MBR (sector 0)
+    uint8_t *mbr = heap_caps_malloc(512, MALLOC_CAP_DMA);
+    if (!mbr) { cdc_printf("No memory\r\n"); return; }
+
+    if (storage_read_raw_sector(0, mbr) != ESP_OK) {
+        cdc_printf("Failed to read MBR\r\n");
+        free(mbr);
+        return;
+    }
+
+    // Check MBR signature
+    if (mbr[510] != 0x55 || mbr[511] != 0xAA) {
+        cdc_printf("No valid MBR signature (no partition table)\r\n");
+        free(mbr);
+        return;
+    }
+
+    uint32_t total_sectors = storage_get_sector_count();
+    uint32_t sector_size = storage_get_sector_size();
+    cdc_printf("SD Card: %.1f MB (%lu sectors x %u bytes)\r\n",
+               (double)total_sectors * sector_size / (1024.0 * 1024.0),
+               total_sectors, sector_size);
+    cdc_printf("Partition table (MBR):\r\n");
+
+    int found = 0;
+    for (int i = 0; i < 4; i++) {
+        uint8_t *pe = &mbr[0x1BE + i * 16];
+        uint8_t status = pe[0];
+        uint8_t type   = pe[4];
+        uint32_t lba_start = pe[8] | (pe[9] << 8) | (pe[10] << 16) | (pe[11] << 24);
+        uint32_t lba_size  = pe[12] | (pe[13] << 8) | (pe[14] << 16) | (pe[15] << 24);
+
+        if (type == 0) continue;
+        found++;
+
+        const char *type_str;
+        switch (type) {
+            case 0x01: type_str = "FAT12"; break;
+            case 0x04: type_str = "FAT16 <32MB"; break;
+            case 0x06: type_str = "FAT16"; break;
+            case 0x07: type_str = "exFAT/NTFS"; break;
+            case 0x0B: type_str = "FAT32"; break;
+            case 0x0C: type_str = "FAT32 LBA"; break;
+            case 0x0E: type_str = "FAT16 LBA"; break;
+            case 0x83: type_str = "Linux"; break;
+            case 0xEE: type_str = "GPT protective"; break;
+            default:   type_str = "Unknown"; break;
+        }
+
+        double size_mb = (double)lba_size * sector_size / (1024.0 * 1024.0);
+        cdc_printf("  P%d: %s (0x%02X) %s  LBA %lu..%lu  %.1f MB\r\n",
+                   i + 1, type_str, type,
+                   (status == 0x80) ? "[boot]" : "      ",
+                   lba_start, lba_start + lba_size - 1, size_mb);
+    }
+
+    if (found == 0) {
+        cdc_printf("  (no partitions - SFD/super floppy?)\r\n");
+    }
+
+    // Show unallocated space
+    // Simple check: sum all partition sizes and compare to total
+    uint32_t used = 0;
+    for (int i = 0; i < 4; i++) {
+        uint8_t *pe = &mbr[0x1BE + i * 16];
+        if (pe[4] != 0) {
+            uint32_t lba_size = pe[12] | (pe[13] << 8) | (pe[14] << 16) | (pe[15] << 24);
+            used += lba_size;
+        }
+    }
+    if (total_sectors > used + 2048) {  // More than 1MB unallocated
+        double unalloc_mb = (double)(total_sectors - used) * sector_size / (1024.0 * 1024.0);
+        cdc_printf("  Unallocated: %.1f MB\r\n", unalloc_mb);
+    }
+
+    free(mbr);
+}
+
+// Dispatch all "sd ..." commands. Returns true if handled.
+static bool handle_sd_command(const char *cmd)
+{
+    // Exact matches first
+    if (strcmp(cmd, "sd") == 0) {
+        char msg[192];
+        const char *mode_str;
+        switch (storage_get_mode()) {
+            case STORAGE_MODE_LOCAL:   mode_str = "LOCAL (mounted)"; break;
+            case STORAGE_MODE_USB_MSC: mode_str = "USB MSC (host access)"; break;
+            default:                   mode_str = "NONE"; break;
+        }
+        if (storage_is_card_present() && storage_is_mounted()) {
+            uint64_t total, free_space;
+            storage_get_info(&total, &free_space);
+            snprintf(msg, sizeof(msg),
+                     "SD Card:\r\n  Card: present\r\n  Mode: %s\r\n  Size: %.1f MB\r\n  Free: %.1f MB\r\n",
+                     mode_str, total / (1024.0 * 1024.0), free_space / (1024.0 * 1024.0));
+        } else if (storage_is_card_present()) {
+            snprintf(msg, sizeof(msg), "SD Card:\r\n  Card: present\r\n  Mode: %s\r\n", mode_str);
+        } else {
+            snprintf(msg, sizeof(msg), "SD Card:\r\n  Card: not detected\r\n");
+        }
+        tud_cdc_write_str(msg);
+        tud_cdc_write_flush();
+        return true;
+    }
+
+    if (strcmp(cmd, "sd msc") == 0) {
+        if (storage_is_msc_active()) {
+            cdc_printf("SD already in USB MSC mode\r\n");
+        } else {
+            esp_err_t ret = storage_usb_msc_enable();
+            if (ret == ESP_OK) {
+                cdc_printf("SD card now visible as USB drive\r\n");
+                cdc_printf("Use 'sd eject' or Windows 'Safely Remove' to return\r\n");
+            } else {
+                cdc_printf("MSC enable failed: %s\r\n", esp_err_to_name(ret));
+            }
+        }
+        return true;
+    }
+
+    if (strcmp(cmd, "sd eject") == 0) {
+        if (!storage_is_msc_active()) {
+            cdc_printf("SD is not in USB MSC mode\r\n");
+        } else {
+            storage_usb_msc_disable();
+            cdc_printf("SD ejected from USB, remounted locally\r\n");
+        }
+        return true;
+    }
+
+    if (strcmp(cmd, "sd df") == 0) {
+        sd_cmd_df();
+        return true;
+    }
+
+    if (strcmp(cmd, "sd part") == 0) {
+        sd_cmd_part();
+        return true;
+    }
+
+    if (strncmp(cmd, "sd ls", 5) == 0) {
+        sd_cmd_ls(cmd + 5);
+        return true;
+    }
+
+    if (strncmp(cmd, "sd tree", 7) == 0) {
+        sd_cmd_tree(cmd + 7);
+        return true;
+    }
+
+    if (strncmp(cmd, "sd mkdir ", 9) == 0) {
+        sd_cmd_mkdir(cmd + 9);
+        return true;
+    }
+
+    if (strncmp(cmd, "sd rm ", 6) == 0 && strncmp(cmd, "sd rmdir ", 9) != 0) {
+        sd_cmd_rm(cmd + 6);
+        return true;
+    }
+
+    if (strncmp(cmd, "sd rmdir ", 9) == 0) {
+        sd_cmd_rmdir(cmd + 9);
+        return true;
+    }
+
+    if (strncmp(cmd, "sd cat ", 7) == 0) {
+        sd_cmd_cat(cmd + 7);
+        return true;
+    }
+
+    if (strncmp(cmd, "sd mv ", 6) == 0) {
+        sd_cmd_mv(cmd + 6);
+        return true;
+    }
+
+    if (strcmp(cmd, "sd format") == 0) {
+        cdc_printf("WARNING: This will erase ALL data and partitions!\r\n");
+        cdc_printf("Creates single partition using full card capacity.\r\n");
+        cdc_printf("Usage: sd format confirm [alloc_size]\r\n");
+        cdc_printf("  alloc_size: 4k, 16k (default), 32k, 64k\r\n");
+        cdc_printf("Use 'sd part' to view current partition table.\r\n");
+        return true;
+    }
+
+    if (strncmp(cmd, "sd format confirm", 17) == 0) {
+        const char *size_arg = cmd + 17;
+        while (*size_arg == ' ') size_arg++;
+
+        uint32_t alloc = 0;  // auto
+        if (strcmp(size_arg, "4k") == 0)       alloc = 4096;
+        else if (strcmp(size_arg, "16k") == 0)  alloc = 16384;
+        else if (strcmp(size_arg, "32k") == 0)  alloc = 32768;
+        else if (strcmp(size_arg, "64k") == 0)  alloc = 65536;
+        else if (*size_arg != '\0') {
+            cdc_printf("Invalid alloc size. Use: 4k, 16k, 32k, 64k\r\n");
+            return true;
+        }
+
+        cdc_printf("Formatting SD card as FAT32");
+        if (alloc > 0) cdc_printf(" (alloc=%luKB)", alloc / 1024);
+        cdc_printf("...\r\n");
+
+        esp_err_t ret = storage_format(alloc);
+        if (ret == ESP_OK) {
+            cdc_printf("Format complete, SD card mounted\r\n");
+        } else {
+            cdc_printf("Format failed: %s\r\n", esp_err_to_name(ret));
+        }
+        return true;
+    }
+
+    return false;  // Not an SD command
+}
+
+//--------------------------------------------------------------------+
 // CDC task
 //--------------------------------------------------------------------+
 
 static void cdc_task(void *arg)
 {
     (void)arg;
-    static char rx_buf[64];
+    static char rx_buf[256];
     static uint8_t rx_idx = 0;
     static bool first_prompt = true;
 
     ESP_LOGI(TAG, "CDC task started - Type 'help' for commands");
 
     while (1) {
+        // Check for MSC eject (host "Safely Remove Hardware")
+        if (storage_msc_eject_pending()) {
+            storage_usb_msc_disable();
+            if (tud_cdc_connected()) {
+                tud_cdc_write_str("\r\n[SD card ejected from USB, remounted locally]\r\n> ");
+                tud_cdc_write_flush();
+            }
+        }
+
         // Send initial prompt once CDC is connected
         if (tud_cdc_connected() && first_prompt) {
             vTaskDelay(pdMS_TO_TICKS(100));  // Small delay for terminal to be ready
@@ -642,61 +1106,72 @@ static void cdc_task(void *arg)
                     if (strcmp(rx_buf, "help") == 0) {
                         tud_cdc_write_str("=== Lyra USB DAC Commands ===\r\n");
                         tud_cdc_write_str("Presets:\r\n");
-                        tud_cdc_write_str("  flat     - Flat (bypass)\r\n");
-                        tud_cdc_write_str("  rock     - Rock (+12dB bass @ 100Hz)\r\n");
-                        tud_cdc_write_str("  jazz     - Jazz (smooth)\r\n");
-                        tud_cdc_write_str("  classical- Classical (V-shape)\r\n");
-                        tud_cdc_write_str("  headphone- Headphone (crossfeed)\r\n");
-                        tud_cdc_write_str("  bass     - Bass Boost (+8dB)\r\n");
-                        tud_cdc_write_str("  test     - TEST (+20dB @ 1kHz) EXTREME!\r\n");
+                        tud_cdc_write_str("  flat      - Flat (bypass)\r\n");
+                        tud_cdc_write_str("  rock      - Rock (+12dB bass)\r\n");
+                        tud_cdc_write_str("  jazz      - Jazz (smooth)\r\n");
+                        tud_cdc_write_str("  classical - Classical (V-shape)\r\n");
+                        tud_cdc_write_str("  headphone - Headphone (crossfeed)\r\n");
+                        tud_cdc_write_str("  bass      - Bass Boost (+8dB)\r\n");
+                        tud_cdc_write_str("  test      - TEST (+20dB @ 1kHz)\r\n");
                         tud_cdc_write_str("Control:\r\n");
-                        tud_cdc_write_str("  on       - Enable DSP\r\n");
-                        tud_cdc_write_str("  off      - Disable DSP (bypass)\r\n");
-                        tud_cdc_write_str("  status   - Show current settings\r\n");
+                        tud_cdc_write_str("  on        - Enable DSP\r\n");
+                        tud_cdc_write_str("  off       - Disable DSP (bypass)\r\n");
+                        tud_cdc_write_str("  status    - Show current settings\r\n");
+                        tud_cdc_write_str("SD Card:\r\n");
+                        tud_cdc_write_str("  sd            - Card status\r\n");
+                        tud_cdc_write_str("  sd df         - Disk usage\r\n");
+                        tud_cdc_write_str("  sd ls [path]  - List directory\r\n");
+                        tud_cdc_write_str("  sd tree [path]- Directory tree\r\n");
+                        tud_cdc_write_str("  sd cat <file> - Show file contents\r\n");
+                        tud_cdc_write_str("  sd mkdir <dir>- Create directory\r\n");
+                        tud_cdc_write_str("  sd rm <file>  - Delete file\r\n");
+                        tud_cdc_write_str("  sd rmdir <dir>- Delete empty dir\r\n");
+                        tud_cdc_write_str("  sd mv <s> <d> - Move/rename\r\n");
+                        tud_cdc_write_str("  sd msc        - USB mass storage\r\n");
+                        tud_cdc_write_str("  sd eject      - Eject from USB\r\n");
+                        tud_cdc_write_str("  sd part       - Show partitions\r\n");
+                        tud_cdc_write_str("  sd format     - Repartition + FAT32\r\n");
                     } else if (strcmp(rx_buf, "flat") == 0) {
                         audio_pipeline_set_preset(PRESET_FLAT);
-                        tud_cdc_write_str("Preset: Flat (bypass)\r\n");
+                        cdc_printf("Preset: Flat (bypass)\r\n");
                     } else if (strcmp(rx_buf, "rock") == 0) {
                         audio_pipeline_set_preset(PRESET_ROCK);
                         audio_pipeline_set_enabled(true);
-                        tud_cdc_write_str("Preset: Rock\r\n");
+                        cdc_printf("Preset: Rock\r\n");
                     } else if (strcmp(rx_buf, "jazz") == 0) {
                         audio_pipeline_set_preset(PRESET_JAZZ);
                         audio_pipeline_set_enabled(true);
-                        tud_cdc_write_str("Preset: Jazz\r\n");
+                        cdc_printf("Preset: Jazz\r\n");
                     } else if (strcmp(rx_buf, "classical") == 0) {
                         audio_pipeline_set_preset(PRESET_CLASSICAL);
                         audio_pipeline_set_enabled(true);
-                        tud_cdc_write_str("Preset: Classical\r\n");
+                        cdc_printf("Preset: Classical\r\n");
                     } else if (strcmp(rx_buf, "headphone") == 0) {
                         audio_pipeline_set_preset(PRESET_HEADPHONE);
                         audio_pipeline_set_enabled(true);
-                        tud_cdc_write_str("Preset: Headphone\r\n");
+                        cdc_printf("Preset: Headphone\r\n");
                     } else if (strcmp(rx_buf, "bass") == 0) {
                         audio_pipeline_set_preset(PRESET_BASS_BOOST);
                         audio_pipeline_set_enabled(true);
-                        tud_cdc_write_str("Preset: Bass Boost\r\n");
+                        cdc_printf("Preset: Bass Boost\r\n");
                     } else if (strcmp(rx_buf, "test") == 0) {
                         audio_pipeline_set_preset(PRESET_TEST_EXTREME);
                         audio_pipeline_set_enabled(true);
-                        tud_cdc_write_str("Preset: TEST EXTREME (+20dB @ 1kHz) - Should be VERY audible!\r\n");
+                        cdc_printf("Preset: TEST EXTREME (+20dB @ 1kHz)\r\n");
                     } else if (strcmp(rx_buf, "on") == 0) {
                         audio_pipeline_set_enabled(true);
-                        tud_cdc_write_str("DSP: ON\r\n");
+                        cdc_printf("DSP: ON\r\n");
                     } else if (strcmp(rx_buf, "off") == 0) {
                         audio_pipeline_set_enabled(false);
-                        tud_cdc_write_str("DSP: OFF (bypass)\r\n");
+                        cdc_printf("DSP: OFF (bypass)\r\n");
                     } else if (strcmp(rx_buf, "status") == 0) {
-                        eq_preset_t preset = audio_pipeline_get_preset();
-                        bool enabled = audio_pipeline_is_enabled();
-                        char status[128];
-                        snprintf(status, sizeof(status),
-                                 "Status:\r\n  Preset: %s\r\n  DSP: %s\r\n",
-                                 preset_get_name(preset),
-                                 enabled ? "ON" : "OFF");
-                        tud_cdc_write_str(status);
+                        cdc_printf("Status:\r\n  Preset: %s\r\n  DSP: %s\r\n",
+                                   preset_get_name(audio_pipeline_get_preset()),
+                                   audio_pipeline_is_enabled() ? "ON" : "OFF");
+                    } else if (strncmp(rx_buf, "sd", 2) == 0 && handle_sd_command(rx_buf)) {
+                        // Handled by handle_sd_command
                     } else {
-                        tud_cdc_write_str("Unknown command. Type 'help'\r\n");
+                        cdc_printf("Unknown command. Type 'help'\r\n");
                     }
 
                     tud_cdc_write_str("> ");
@@ -777,6 +1252,24 @@ void app_main(void)
     ESP_LOGI(TAG, "Audio Pipeline initialized with preset: %s",
              preset_get_name(audio_pipeline_get_preset()));
 
+    // 3.7. SD Card
+    ESP_LOGI(TAG, "Init SD card...");
+    esp_err_t sd_ret = storage_init();
+    if (sd_ret == ESP_OK && storage_is_card_present()) {
+        esp_err_t mount_ret = storage_mount();
+        if (mount_ret == ESP_OK) {
+            uint64_t total, free_space;
+            if (storage_get_info(&total, &free_space) == ESP_OK) {
+                ESP_LOGI(TAG, "SD card mounted: %.1f MB total, %.1f MB free",
+                         total / (1024.0 * 1024.0), free_space / (1024.0 * 1024.0));
+            }
+        } else {
+            ESP_LOGW(TAG, "SD card present but mount failed - may need formatting ('sd format' via CDC)");
+        }
+    } else {
+        ESP_LOGW(TAG, "No SD card detected (insert card and reboot, or use 'sd' command)");
+    }
+
     // 4. USB PHY + TinyUSB
     ESP_LOGI(TAG, "Init USB PHY...");
     usb_phy_init();
@@ -789,7 +1282,7 @@ void app_main(void)
         ESP_LOGE(TAG, "TinyUSB init failed!");
         return;
     }
-    ESP_LOGI(TAG, "TinyUSB initialized (HS, UAC2 + CDC)");
+    ESP_LOGI(TAG, "TinyUSB initialized (HS, UAC2 + CDC + MSC)");
 
     // Small delay to allow Windows to properly enumerate the device
     ESP_LOGI(TAG, "Waiting for USB enumeration...");

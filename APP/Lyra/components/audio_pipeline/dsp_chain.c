@@ -128,7 +128,7 @@ static inline float soft_limit(float sample)
 }
 
 // Static buffer to avoid stack allocation overhead
-static float g_temp_buffer[392 / 4];  // Max buffer size in samples (392 bytes / 4 bytes per sample)
+// static float g_temp_buffer[392 / 4];  // Max buffer size in samples (392 bytes / 4 bytes per sample)
 
 // Mark as hot path for aggressive optimization
 __attribute__((hot))
@@ -148,7 +148,7 @@ void dsp_chain_process(dsp_chain_t *restrict chain, int32_t *restrict buffer_i32
         return;
     }
 
-    const uint32_t num_samples = frames * 2;  // stereo
+    // const uint32_t num_samples = frames * 2;  // stereo
 
     // OPTIMIZATION: Process samples frame-by-frame for minimal latency
     // Code is structured to maximize instruction-level parallelism and FPU utilization
