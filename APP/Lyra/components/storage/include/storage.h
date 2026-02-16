@@ -53,3 +53,6 @@ int32_t storage_read_sectors(uint32_t lba, void *buf, uint32_t num_sectors);
 int32_t storage_write_sectors(uint32_t lba, const void *buf, uint32_t num_sectors);
 uint32_t storage_get_sector_count(void);
 uint16_t storage_get_sector_size(void);
+
+// Print detailed SD card diagnostics (speed, bus width, timing, etc.)
+void storage_print_card_diagnostics(void);

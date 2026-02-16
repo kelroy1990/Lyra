@@ -12,6 +12,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
 #if SOC_SDMMC_IO_POWER_EXTERNAL
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #endif
@@ -540,4 +542,79 @@ uint32_t storage_get_sector_count(void)
 uint16_t storage_get_sector_size(void)
 {
     return s_card ? (uint16_t)s_card->csd.sector_size : 512;
+}
+
+//--------------------------------------------------------------------+
+// Diagnostics
+//--------------------------------------------------------------------+
+
+void storage_print_card_diagnostics(void)
+{
+    if (!s_card) {
+        ESP_LOGW(TAG, "DIAG: No SD card present");
+        return;
+    }
+
+    ESP_LOGI(TAG, "=== SD Card Diagnostics ===");
+
+    // Basic card info (same as sdmmc_card_print_info but to ESP_LOG)
+    ESP_LOGI(TAG, "  Name: %s", s_card->cid.name);
+
+    const char *type_str = "Unknown";
+    if (s_card->is_mmc) {
+        type_str = "MMC";
+    } else if ((s_card->ocr & SD_OCR_SDHC_CAP) != 0) {
+        type_str = "SDHC/SDXC";
+    } else {
+        type_str = "SDSC";
+    }
+    ESP_LOGI(TAG, "  Type: %s", type_str);
+
+    // Speed info
+    ESP_LOGI(TAG, "  Speed: %lu kHz (configured max: %d kHz) %s",
+             (unsigned long)s_card->real_freq_khz,
+             s_host.max_freq_khz,
+             s_card->is_ddr ? "[DDR]" : "[SDR]");
+
+    // Bus width
+    uint32_t bus_width = s_card->ssr.cur_bus_width ? 4 : 1;
+    ESP_LOGI(TAG, "  Bus width: %lu-bit", (unsigned long)bus_width);
+
+    // CSD info
+    ESP_LOGI(TAG, "  CSD: ver=%d, sector_size=%d, capacity=%d, read_bl_len=%d",
+             s_card->csd.csd_ver,
+             s_card->csd.sector_size,
+             s_card->csd.capacity,
+             s_card->csd.read_block_len);
+
+    // Size
+    uint64_t size_mb = ((uint64_t)s_card->csd.capacity * s_card->csd.sector_size) / (1024 * 1024);
+    ESP_LOGI(TAG, "  Size: %llu MB", (unsigned long long)size_mb);
+
+    // SSR info (allocation unit helps understand card performance tier)
+    ESP_LOGI(TAG, "  SSR: alloc_unit=%lu KB, erase_size=%lu AU, erase_timeout=%lu s",
+             (unsigned long)s_card->ssr.alloc_unit_kb,
+             (unsigned long)s_card->ssr.erase_size_au,
+             (unsigned long)s_card->ssr.erase_timeout);
+
+    // Theoretical max throughput
+    uint32_t max_throughput_kbs = (s_card->real_freq_khz * bus_width) / 8;
+    ESP_LOGI(TAG, "  Theoretical max: %lu KB/s (%.1f MB/s)",
+             (unsigned long)max_throughput_kbs, max_throughput_kbs / 1024.0);
+
+    // DMA buffer test: check if a heap_caps_malloc(DMA) buffer passes alignment
+    void *test_buf = heap_caps_malloc(512, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (test_buf) {
+        ESP_LOGI(TAG, "  DMA test buffer: addr=%p, dma_capable=%d, internal=%d",
+                 test_buf,
+                 esp_ptr_dma_capable(test_buf),
+                 esp_ptr_internal(test_buf));
+        heap_caps_free(test_buf);
+    }
+    ESP_LOGI(TAG, "  DMA-capable free: %lu bytes",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+
+    // Internal pullup status
+    ESP_LOGI(TAG, "  Internal pullups: ENABLED (SDMMC_SLOT_FLAG_INTERNAL_PULLUP)");
+    ESP_LOGI(TAG, "=== End SD Diagnostics ===");
 }

@@ -1255,6 +1255,9 @@ void app_main(void)
     ESP_LOGI(TAG, "Init SD card...");
     esp_err_t sd_ret = storage_init();
     if (sd_ret == ESP_OK && storage_is_card_present()) {
+        // Print detailed SD diagnostics (speed, bus width, DMA info)
+        storage_print_card_diagnostics();
+
         esp_err_t mount_ret = storage_mount();
         if (mount_ret == ESP_OK) {
             uint64_t total, free_space;
