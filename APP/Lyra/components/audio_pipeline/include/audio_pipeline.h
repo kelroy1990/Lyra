@@ -75,6 +75,14 @@ void audio_pipeline_update_format(uint32_t sample_rate, uint8_t bits_per_sample)
 void audio_pipeline_process(int32_t *buffer, uint32_t frames);
 
 /**
+ * @brief Get current audio format
+ *
+ * @param sample_rate Output: current sample rate (Hz)
+ * @param bits_per_sample Output: current bit depth
+ */
+void audio_pipeline_get_format(uint32_t *sample_rate, uint8_t *bits_per_sample);
+
+/**
  * @brief Get DSP statistics (CPU usage, etc.)
  *
  * @return Pointer to statistics structure

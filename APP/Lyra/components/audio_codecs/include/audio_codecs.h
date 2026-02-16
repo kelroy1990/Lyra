@@ -1,13 +1,92 @@
+#pragma once
+
+#include <stdint.h>
+#include <stdbool.h>
+
+//--------------------------------------------------------------------+
+// Codec format types
+//--------------------------------------------------------------------+
+
+typedef enum {
+    CODEC_FORMAT_UNKNOWN = 0,
+    CODEC_FORMAT_WAV,
+    CODEC_FORMAT_FLAC,
+    CODEC_FORMAT_MP3,
+} codec_format_t;
+
+//--------------------------------------------------------------------+
+// Audio file info (populated after opening)
+//--------------------------------------------------------------------+
+
+typedef struct {
+    uint32_t sample_rate;
+    uint8_t  bits_per_sample;   // Original file bit depth (16, 24, 32)
+    uint8_t  channels;          // 1 (mono) or 2 (stereo)
+    uint64_t total_frames;      // Total PCM frames (0 if unknown)
+    uint32_t duration_ms;       // Duration in milliseconds (0 if unknown)
+    codec_format_t format;
+} codec_info_t;
+
+//--------------------------------------------------------------------+
+// Opaque decoder handle
+//--------------------------------------------------------------------+
+
+typedef struct codec_handle_s codec_handle_t;
+
+//--------------------------------------------------------------------+
+// Public API
+//--------------------------------------------------------------------+
+
 /**
- * @file    audio_codecs.h
- * @date    2026-02-11
- * @brief   Public API for audio file decoders
+ * @brief Open an audio file and initialize the appropriate decoder
  *
- * Will expose:
- * - audio_codec_open()      : Open file, detect format, init decoder
- * - audio_codec_decode()    : Decode next block of PCM samples
- * - audio_codec_seek()      : Seek to position
- * - audio_codec_get_info()  : Sample rate, bit depth, channels, duration
- * - audio_codec_get_meta()  : Title, artist, album, art
- * - audio_codec_close()     : Release decoder resources
+ * Auto-detects format from file extension (.wav, .flac, .mp3).
+ * All decoders output int32_t stereo interleaved, left-justified.
+ *
+ * @param filepath Full path to the audio file (e.g. "/sdcard/music/song.flac")
+ * @return Handle on success, NULL on failure
  */
+codec_handle_t *codec_open(const char *filepath);
+
+/**
+ * @brief Decode next block of PCM frames
+ *
+ * Output: int32_t stereo interleaved, left-justified.
+ * Mono files are expanded to stereo (duplicated to both channels).
+ *
+ * @param handle   Decoder handle from codec_open()
+ * @param buffer   Output buffer for decoded PCM (must hold max_frames * 2 int32_t)
+ * @param max_frames Maximum number of stereo frames to decode
+ * @return Number of frames decoded (0 = EOF, negative = error)
+ */
+int32_t codec_decode(codec_handle_t *handle, int32_t *buffer, uint32_t max_frames);
+
+/**
+ * @brief Seek to a specific PCM frame position
+ *
+ * @param handle    Decoder handle
+ * @param frame_pos Target frame position (0 = beginning)
+ * @return true on success
+ */
+bool codec_seek(codec_handle_t *handle, uint64_t frame_pos);
+
+/**
+ * @brief Get audio file information
+ *
+ * @param handle Decoder handle
+ * @return Pointer to info struct (valid while handle is open)
+ */
+const codec_info_t *codec_get_info(const codec_handle_t *handle);
+
+/**
+ * @brief Close decoder and release all resources
+ */
+void codec_close(codec_handle_t *handle);
+
+/**
+ * @brief Detect codec format from file extension
+ *
+ * @param filepath File path to check
+ * @return Detected format or CODEC_FORMAT_UNKNOWN
+ */
+codec_format_t codec_detect_format(const char *filepath);

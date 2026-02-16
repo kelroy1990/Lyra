@@ -9,7 +9,7 @@
 // Result: ~230 cycles saved per filter on preset change (instant switching)
 //--------------------------------------------------------------------+
 
-// Rock: Lowshelf @ 100Hz, +12dB, Q=0.7, fs=48000
+// Rock: Lowshelf @ 100Hz, +6dB, Q=0.7, fs=48000 (coeffs not used — calculated dynamically)
 static const biquad_coeffs_t rock_coeffs_48k[1] = {
     {
         .b0 =  2.006588f,
@@ -111,13 +111,13 @@ static const preset_config_t preset_flat = {
     .coeffs_48k = NULL,  // No filters
 };
 
-// Preset 1: Rock (EXTREME bass boost for testing - very audible)
+// Preset 1: Rock (moderate bass boost)
 static const preset_config_t preset_rock = {
     .name = "Rock",
-    .description = "Bass +12dB @ 100Hz (EXTREME)",
+    .description = "Bass +6dB @ 100Hz",
     .num_filters = 1,
     .filters = {
-        {.type = BIQUAD_LOWSHELF,  .freq = 100.0f,   .gain = 12.0f, .q = 0.7f, .sample_rate = 48000},
+        {.type = BIQUAD_LOWSHELF,  .freq = 100.0f,   .gain = 6.0f, .q = 0.7f, .sample_rate = 48000},
     },
     .enable_crossfeed = false,
     .coeffs_48k = rock_coeffs_48k,  // Pre-calculated for instant loading

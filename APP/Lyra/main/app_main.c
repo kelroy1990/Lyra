@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -23,6 +24,8 @@
 #include "audio_pipeline.h"
 #include "storage.h"
 #include "usb_mode.h"
+#include "audio_source.h"
+#include "sd_player.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
@@ -44,6 +47,12 @@ static StreamBufferHandle_t s_audio_stream = NULL;
 static TaskHandle_t s_feeder_task_handle = NULL;
 static volatile bool s_i2s_reconfiguring = false;
 static volatile bool s_feeder_in_write = false;
+
+// Getters for shared pipeline state (used by audio_source.c and sd_player)
+StreamBufferHandle_t audio_get_stream_buffer(void) { return s_audio_stream; }
+bool audio_is_reconfiguring(void) { return s_i2s_reconfiguring; }
+void audio_set_reconfiguring(bool val) { s_i2s_reconfiguring = val; }
+bool audio_is_feeder_writing(void) { return s_feeder_in_write; }
 
 //--------------------------------------------------------------------+
 // Audio diagnostics (temporary - remove after verification)
@@ -315,7 +324,7 @@ static void codec_init(void)
 // I2S Output
 //--------------------------------------------------------------------+
 
-static void i2s_output_init(uint32_t sample_rate, uint8_t bits_per_sample)
+void i2s_output_init(uint32_t sample_rate, uint8_t bits_per_sample)
 {
     if (i2s_tx) {
         i2s_channel_disable(i2s_tx);
@@ -621,8 +630,9 @@ static void i2s_feeder_task(void *arg)
             if (us > s_diag.i2s_write_max_us) s_diag.i2s_write_max_us = us;
             if (offset < received) s_diag.i2s_block_count++;
 
-            // Notify audio_task: stream buffer has space now
-            if (s_audio_task_handle) xTaskNotifyGive(s_audio_task_handle);
+            // Notify active producer: stream buffer has space now
+            TaskHandle_t producer = audio_source_get_producer_handle();
+            if (producer) xTaskNotifyGive(producer);
         }
     }
 }
@@ -640,8 +650,8 @@ static void audio_task(void *arg)
     s_diag.stream_min = UINT32_MAX;
 
     while (1) {
-        // Sleep when USB is not in audio mode (e.g. storage mode)
-        if (!audio_task_is_active()) {
+        // Sleep when not in USB audio source (e.g. storage mode or SD playback)
+        if (audio_source_get() != AUDIO_SOURCE_USB) {
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
@@ -781,6 +791,20 @@ static void cdc_printf(const char *fmt, ...)
     va_end(ap);
     tud_cdc_write_str(buf);
     tud_cdc_write_flush();
+}
+
+//--------------------------------------------------------------------+
+// SD Player audio callback wrappers (int ↔ audio_source_t)
+//--------------------------------------------------------------------+
+
+static int sd_player_cb_get_source(void)
+{
+    return (int)audio_source_get();
+}
+
+static void sd_player_cb_switch_source(int src, uint32_t sr, uint8_t bits)
+{
+    audio_source_switch((audio_source_t)src, sr, bits);
 }
 
 // Build full path from user input (relative to /sdcard)
@@ -1193,17 +1217,16 @@ static bool handle_sd_command(const char *cmd)
         if (alloc > 0) cdc_printf(" (alloc=%luKB)", alloc / 1024);
         cdc_printf("...\r\n");
 
-        // Pause audio task so format_task can run on CPU1
-        bool was_active = audio_task_is_active();
-        if (was_active) {
-            audio_task_set_active(false);
-            vTaskDelay(pdMS_TO_TICKS(150));
+        // Pause audio source so format can run safely
+        audio_source_t prev_source = audio_source_get();
+        if (prev_source != AUDIO_SOURCE_NONE) {
+            audio_source_switch(AUDIO_SOURCE_NONE, 0, 0);
         }
 
         esp_err_t ret = storage_format(alloc);
 
-        if (was_active) {
-            audio_task_set_active(true);
+        if (prev_source != AUDIO_SOURCE_NONE) {
+            audio_source_switch(prev_source, 0, 0);
         }
 
         if (ret == ESP_OK) {
@@ -1274,6 +1297,17 @@ static void cdc_task(void *arg)
                         tud_cdc_write_str("  on        - Enable DSP\r\n");
                         tud_cdc_write_str("  off       - Disable DSP (bypass)\r\n");
                         tud_cdc_write_str("  status    - Show current settings\r\n");
+                        tud_cdc_write_str("  cpu       - Task CPU%% / stack usage\r\n");
+                        tud_cdc_write_str("Player:\r\n");
+                        tud_cdc_write_str("  play <path>   - Play file (relative to /sdcard)\r\n");
+                        tud_cdc_write_str("  pause         - Pause playback\r\n");
+                        tud_cdc_write_str("  resume        - Resume playback\r\n");
+                        tud_cdc_write_str("  stop          - Stop (back to USB audio)\r\n");
+                        tud_cdc_write_str("  next          - Next track\r\n");
+                        tud_cdc_write_str("  prev          - Previous / restart\r\n");
+                        tud_cdc_write_str("  seek <sec>    - Seek to position\r\n");
+                        tud_cdc_write_str("  track         - Current track info\r\n");
+                        tud_cdc_write_str("  playlist      - Show playlist\r\n");
                         tud_cdc_write_str("SD Card:\r\n");
                         tud_cdc_write_str("  sd            - Card status\r\n");
                         tud_cdc_write_str("  sd df         - Disk usage\r\n");
@@ -1325,6 +1359,99 @@ static void cdc_task(void *arg)
                         cdc_printf("Status:\r\n  Preset: %s\r\n  DSP: %s\r\n",
                                    preset_get_name(audio_pipeline_get_preset()),
                                    audio_pipeline_is_enabled() ? "ON" : "OFF");
+                    } else if (strcmp(rx_buf, "cpu") == 0) {
+                        // Delta-mode CPU stats: shows usage since last 'cpu' call
+                        #define CPU_MAX_TASKS 16
+                        static uint32_t prev_runtime[CPU_MAX_TASKS];
+                        static char     prev_names[CPU_MAX_TASKS][configMAX_TASK_NAME_LEN];
+                        static uint32_t prev_total;
+                        static UBaseType_t prev_count;
+
+                        UBaseType_t num_tasks = uxTaskGetNumberOfTasks();
+                        TaskStatus_t *task_array = malloc(num_tasks * sizeof(TaskStatus_t));
+                        if (task_array) {
+                            uint32_t total_runtime;
+                            UBaseType_t got = uxTaskGetSystemState(task_array, num_tasks, &total_runtime);
+                            uint32_t dt = total_runtime - prev_total;
+
+                            if (got > 0 && dt > 0 && prev_count > 0) {
+                                cdc_printf("=== CPU (last %.1fs) ===\r\n", dt / 1000000.0f);
+                                cdc_printf("%-12s Core  CPU%%  Stack\r\n", "Task");
+                                cdc_printf("-------------------------------\r\n");
+                                uint32_t core_busy[2] = {0, 0};
+                                for (UBaseType_t i = 0; i < got; i++) {
+                                    // Find this task's previous runtime
+                                    uint32_t prev_rt = 0;
+                                    for (UBaseType_t j = 0; j < prev_count; j++) {
+                                        if (strcmp(task_array[i].pcTaskName, prev_names[j]) == 0) {
+                                            prev_rt = prev_runtime[j];
+                                            break;
+                                        }
+                                    }
+                                    uint32_t task_dt = task_array[i].ulRunTimeCounter - prev_rt;
+                                    uint32_t pct_x10 = (uint32_t)(((uint64_t)task_dt * 1000ULL) / dt);
+                                    int core = task_array[i].xCoreID;
+                                    const char *core_str = (core == 0) ? "0" :
+                                                           (core == 1) ? "1" : "*";
+                                    cdc_printf("%-12s  %s   %2lu.%lu  %5u\r\n",
+                                               task_array[i].pcTaskName,
+                                               core_str,
+                                               pct_x10 / 10, pct_x10 % 10,
+                                               (unsigned)task_array[i].usStackHighWaterMark);
+                                    if (core >= 0 && core <= 1 &&
+                                        strncmp(task_array[i].pcTaskName, "IDLE", 4) != 0) {
+                                        core_busy[core] += task_dt;
+                                    }
+                                }
+                                uint32_t c0 = (uint32_t)(((uint64_t)core_busy[0] * 1000ULL) / dt);
+                                uint32_t c1 = (uint32_t)(((uint64_t)core_busy[1] * 1000ULL) / dt);
+                                cdc_printf("-------------------------------\r\n");
+                                cdc_printf("Core 0: %lu.%lu%%  Core 1: %lu.%lu%%\r\n",
+                                           c0 / 10, c0 % 10, c1 / 10, c1 % 10);
+                            } else if (got > 0) {
+                                cdc_printf("Baseline captured. Run 'cpu' again for delta.\r\n");
+                            }
+                            // Save current snapshot as baseline
+                            prev_count = (got < CPU_MAX_TASKS) ? got : CPU_MAX_TASKS;
+                            for (UBaseType_t i = 0; i < prev_count; i++) {
+                                prev_runtime[i] = task_array[i].ulRunTimeCounter;
+                                strncpy(prev_names[i], task_array[i].pcTaskName, configMAX_TASK_NAME_LEN - 1);
+                                prev_names[i][configMAX_TASK_NAME_LEN - 1] = '\0';
+                            }
+                            prev_total = total_runtime;
+                            free(task_array);
+                        } else {
+                            cdc_printf("malloc failed\r\n");
+                        }
+                        cdc_printf("Heap: %lu free, %lu min-ever\r\n",
+                                   (unsigned long)esp_get_free_heap_size(),
+                                   (unsigned long)esp_get_minimum_free_heap_size());
+                    } else if (strncmp(rx_buf, "play ", 5) == 0) {
+                        const char *arg = rx_buf + 5;
+                        while (*arg == ' ') arg++;
+                        if (*arg) {
+                            sd_player_cmd_play(arg);
+                        } else {
+                            cdc_printf("Usage: play <path>\r\n");
+                        }
+                    } else if (strcmp(rx_buf, "pause") == 0) {
+                        sd_player_cmd_pause();
+                    } else if (strcmp(rx_buf, "resume") == 0) {
+                        sd_player_cmd_resume();
+                    } else if (strcmp(rx_buf, "stop") == 0) {
+                        sd_player_cmd_stop();
+                    } else if (strcmp(rx_buf, "next") == 0) {
+                        sd_player_cmd_next();
+                    } else if (strcmp(rx_buf, "prev") == 0) {
+                        sd_player_cmd_prev();
+                    } else if (strncmp(rx_buf, "seek ", 5) == 0) {
+                        const char *arg = rx_buf + 5;
+                        while (*arg == ' ') arg++;
+                        sd_player_cmd_seek(strtoul(arg, NULL, 10));
+                    } else if (strcmp(rx_buf, "track") == 0) {
+                        sd_player_cmd_track_info();
+                    } else if (strcmp(rx_buf, "playlist") == 0) {
+                        sd_player_cmd_playlist_info();
                     } else if (strncmp(rx_buf, "sd", 2) == 0 && handle_sd_command(rx_buf)) {
                         // Handled by handle_sd_command
                     } else {
@@ -1445,9 +1572,12 @@ void app_main(void)
     ESP_LOGI(TAG, "Waiting for USB enumeration...");
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    // 5. Audio stream buffer (decouples USB drain from I2S DMA blocking)
+    // 5. Audio stream buffer (decouples producer from I2S DMA blocking)
     s_audio_stream = xStreamBufferCreate(AUDIO_STREAM_BUF_SIZE, 1);
     assert(s_audio_stream);
+
+    // 5.5. Audio source manager
+    audio_source_init();
 
     // 6. Tasks
     // CPU 0: USB stack (TinyUSB), CDC, and system tasks
@@ -1457,8 +1587,23 @@ void app_main(void)
     // CPU 1: Audio pipeline (prio 5) + I2S feeder (prio 4)
     // audio_task has higher priority: must drain USB FIFO promptly to avoid overflow
     // feeder_task runs when audio_task sleeps: feeds I2S DMA from stream buffer
-    xTaskCreatePinnedToCore(audio_task, "audio", 12288, NULL, 5, &s_audio_task_handle, 1);
+    xTaskCreatePinnedToCore(audio_task, "audio", 16384, NULL, 5, &s_audio_task_handle, 1);
     xTaskCreatePinnedToCore(i2s_feeder_task, "i2s_feed", 8192, NULL, 4, &s_feeder_task_handle, 1);
 
-    ESP_LOGI(TAG, "Lyra ready - USB Audio 2.0 -> ES8311 DAC");
+    // Set USB audio as default source and register producer handle
+    audio_source_set_producer_handle(s_audio_task_handle);
+    audio_source_switch(AUDIO_SOURCE_USB, 0, 0);
+
+    // 7. SD Player (music from microSD)
+    static const sd_player_audio_cbs_t sd_audio_cbs = {
+        .get_source         = sd_player_cb_get_source,
+        .switch_source      = sd_player_cb_switch_source,
+        .set_producer_handle = audio_source_set_producer_handle,
+        .get_stream_buffer  = audio_get_stream_buffer,
+        .process_audio      = audio_pipeline_process,
+    };
+    sd_player_init(cdc_printf, &sd_audio_cbs);
+    sd_player_start_task();
+
+    ESP_LOGI(TAG, "Lyra ready - USB Audio 2.0 + SD Player -> ES8311 DAC");
 }

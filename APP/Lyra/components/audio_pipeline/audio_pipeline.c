@@ -111,6 +111,16 @@ void audio_pipeline_process(int32_t *buffer, uint32_t frames)
 }
 
 //--------------------------------------------------------------------+
+// Format query
+//--------------------------------------------------------------------+
+
+void audio_pipeline_get_format(uint32_t *sample_rate, uint8_t *bits_per_sample)
+{
+    if (sample_rate) *sample_rate = g_dsp_chain.format.sample_rate;
+    if (bits_per_sample) *bits_per_sample = g_dsp_chain.format.bits_per_sample;
+}
+
+//--------------------------------------------------------------------+
 // Statistics
 //--------------------------------------------------------------------+
 

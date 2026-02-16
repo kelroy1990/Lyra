@@ -1,4 +1,5 @@
 #include "usb_mode.h"
+#include "audio_source.h"
 #include "tusb.h"
 #include "storage.h"
 #include "esp_log.h"
@@ -6,23 +7,6 @@
 #include "freertos/task.h"
 
 static const char *TAG = "usb_mode";
-
-// Audio task active flag (shared with app_main.c via audio_task_set_active)
-static volatile bool s_audio_active = true;
-
-//--------------------------------------------------------------------+
-// Audio task control
-//--------------------------------------------------------------------+
-
-void audio_task_set_active(bool active)
-{
-    s_audio_active = active;
-}
-
-bool audio_task_is_active(void)
-{
-    return s_audio_active;
-}
 
 //--------------------------------------------------------------------+
 // Mode switch
@@ -50,9 +34,9 @@ esp_err_t usb_mode_switch(usb_mode_t new_mode)
 
     // --- Pre-switch cleanup ---
     if (g_usb_mode == USB_MODE_AUDIO) {
-        // Leaving audio: suspend audio task
-        audio_task_set_active(false);
-        vTaskDelay(pdMS_TO_TICKS(150));  // Wait for audio_task to enter sleep
+        // Leaving audio: suspend audio source
+        audio_source_switch(AUDIO_SOURCE_NONE, 0, 0);
+        vTaskDelay(pdMS_TO_TICKS(150));
     }
 
     if (g_usb_mode == USB_MODE_STORAGE) {
@@ -87,8 +71,8 @@ esp_err_t usb_mode_switch(usb_mode_t new_mode)
     }
 
     if (new_mode == USB_MODE_AUDIO) {
-        // Entering audio: resume audio task
-        audio_task_set_active(true);
+        // Entering audio: activate USB audio source
+        audio_source_switch(AUDIO_SOURCE_USB, 0, 0);
     }
 
     // --- USB reconnect ---

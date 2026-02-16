@@ -1,7 +1,7 @@
 # TODO - Lyra Project
 
-> **Última actualización:** 2025-01-XX
-> **Estado actual:** Fase F3 (DSP Pipeline) COMPLETADA ✅
+> **Última actualización:** 2026-02-16
+> **Estado actual:** Audio Pipeline optimizado, DSP corregido ✅
 
 ---
 
@@ -12,11 +12,15 @@
 - **F0**: Estructura del proyecto
 - **F0.5**: USB Audio (UAC2 + CDC)
 - **F1**: I2S output (temporal con ES8311, objetivo ES9039Q2M)
-- **F3**: **DSP Pipeline con EQ** ← **COMPLETADA HOY**
+- **F1.5**: MSC (USB Mass Storage) — funcional, pendiente optimizar velocidad
+- **F3**: DSP Pipeline con EQ
+- **F3.1**: **Audio Pipeline decoupled architecture** — space-check, zero overflow
+- **F3.2**: **Fix coeficientes biquad** — eliminado path pre-calculado con error 2x
 
 ### 🔄 Próximas Fases
 
 - **F2**: Display & UI base (LVGL + MIPI DSI)
+- **F3.5**: **DSP Features avanzadas** ← **PRÓXIMO**
 - **F4**: Gestión de energía (MAX77972, BMA400)
 - **F5**: Controles físicos (botones GPIO)
 - **F6**: Reproducción microSD (FLAC, WAV, MP3)
@@ -63,10 +67,10 @@ components/audio_pipeline/
    - Evita clipping audible con boost extremo
    - +10 cycles pero mejora calidad perceptual
 
-3. **Pre-cálculo de coeficientes @ 48kHz**
-   - Instant preset switching (< 5 cycles)
-   - Ahorra ~230 cycles por filtro
-   - Presets: Rock, Jazz, Classical, Bass Boost, Test Extreme
+3. **Cálculo dinámico de coeficientes**
+   - Recálculo automático al cambiar sample rate
+   - RBJ Audio EQ Cookbook (normalizado por a0)
+   - Coste: ~230 cycles por filtro solo al cambiar preset/formato (no en hot path)
 
 4. **ILP optimization (Instruction-Level Parallelism)**
    - Reorganización de código para FPU pipeline
@@ -141,44 +145,77 @@ Acceso via CDC (puerto COM/ttyUSB):
 
 ---
 
-## 🔴 TODOs Pendientes - Fase F3
+## 🔴 TODOs Pendientes - Fase F3.5 (DSP Features Avanzadas)
 
 ### **Prioridad ALTA**
 
-- [ ] **Implementar Crossfeed** para preset Headphone
-  - Algoritmo: Chu Moy o Jan Meier
+- [ ] **EQ Paramétrico de 5 bandas (usuario configurable)**
+  - 5 filtros biquad independientes controlables desde UI
+  - Cada banda: frecuencia (20Hz-20kHz), ganancia (-12/+12 dB), Q (0.1-10)
+  - Tipos por banda: Low Shelf, Peaking (×3), High Shelf
+  - Frecuencias default: 60Hz, 230Hz, 1kHz, 3.5kHz, 12kHz
+  - Recálculo dinámico de coeficientes al cambiar parámetros
+  - Coste: 5 × 18 = 90 cycles (trivial incluso @ 384kHz)
+  - Archivos: reutilizar `biquad_init()` existente, añadir API de control
+  - UI: 5 sliders verticales con labels de frecuencia + visualización curva
+
+- [ ] **Implementar Crossfeed** para mejorar imagen estéreo en auriculares
+  - Algoritmo: Chu Moy (simple) o Jan Meier (natural)
+  - Mezcla controlada de canal opuesto con delay + filtro paso bajo
+  - Parámetro: intensidad (0-100%, default ~30%)
   - Coste estimado: ~100 cycles
   - Archivos: `dsp_crossfeed.h`, `dsp_crossfeed.c`
-  - Integración en `dsp_chain.c` cuando `crossfeed_enabled == true`
+  - Integración en `dsp_chain.c` después de EQ, antes de limiter
+  - UI: toggle on/off + slider de intensidad
+
+- [ ] **Loudness Compensation (Equal Loudness)**
+  - Compensación Fletcher-Munson: boost graves y agudos a volumen bajo
+  - Curvas ISO 226 simplificadas (3-4 filtros)
+  - Se activa automáticamente según nivel de volumen del sistema
+  - Coste: ~3-4 filtros × 18 = 54-72 cycles
+  - UI: toggle on/off (automático según volumen)
 
 ### **Prioridad MEDIA**
+
+- [ ] **Balance L/R**
+  - Control de balance izquierda/derecha (-100 a +100)
+  - Implementación: multiplicación por factor (0.0 a 1.0) por canal
+  - Coste: ~4 cycles (2 multiplicaciones)
+  - UI: slider horizontal centrado
+
+- [ ] **Selección de filtro digital DAC (ES9039Q2M)**
+  - ES9039Q2M tiene 7 filtros digitales seleccionables via I2C
+  - Opciones: Fast Roll-Off, Slow Roll-Off, Minimum Phase, Apodizing, Hybrid, Brick Wall, etc.
+  - Cada uno con distinta respuesta de fase y ringing
+  - Acceso: registro I2C del DAC (sin coste DSP, lo hace el DAC)
+  - UI: selector dropdown con descripción de cada filtro
+  - Requisito: driver I2C para ES9039Q2M (se implementará en migración hardware)
+
+- [ ] **NVS Storage para presets personalizados**
+  - Guardar configuración de EQ del usuario en flash
+  - Cargar último preset al boot
+  - Máximo 5-10 presets de usuario
+  - API: `preset_save_to_nvs()`, `preset_load_from_nvs()`, `preset_delete_from_nvs()`
+  - Almacenar: 5 bandas + crossfeed + loudness + balance + nombre
 
 - [ ] **Integrar con UI (cuando F2 esté lista)**
   - Medidor de CPU en tiempo real
   - Selector de presets con validación
-  - Sliders para filtros personalizados
+  - EQ paramétrico con sliders + curva de respuesta
   - Advertencia si cambio de sample rate excede límite
   - Ver ejemplos en `DSP_BUDGET_GUIDE.md`
 
-- [ ] **NVS Storage para presets personalizados**
-  - Guardar configuración de EQ del usuario
-  - Cargar al boot
-  - API: `preset_save_to_nvs()`, `preset_load_from_nvs()`
-
-- [ ] **Pre-calcular coeficientes para otros sample rates**
-  - Actualmente solo @ 48kHz
-  - Añadir: 44.1kHz, 96kHz, 192kHz, 384kHz
-  - Estructura: `coeffs_44k`, `coeffs_96k`, etc.
-
-### **Prioridad BAJA (Mejoras futuras)**
-
 - [ ] **Más presets predefinidos**
-  - Pop, Metal, Electronic, Vocal, Acoustic
+  - Pop, Metal, Electronic, Vocal, Acoustic, Podcast
   - Cada uno con 3-5 filtros optimizados
+  - Basados en curvas de referencia de la industria
+
+### **Prioridad BAJA (Futuro)**
 
 - [ ] **Dynamic Range Compression (DRC)**
   - Limiter, compressor, expander
-  - Solo viable @ ≤192kHz (coste alto)
+  - Solo viable @ ≤192kHz (coste alto ~80 cycles)
+  - Útil para escucha nocturna / ambientes ruidosos
 
 - [ ] **Room correction (offline)**
   - Pre-procesar en app companion
@@ -189,6 +226,10 @@ Acceso via CDC (puerto COM/ttyUSB):
   - Analizar contenido en tiempo real
   - Ajustar EQ dinámicamente
   - Muy costoso, solo @ 48-96kHz
+
+- [ ] **Limpieza código legacy**
+  - Eliminar arrays `coeffs_48k` en `dsp_presets.c` (código muerto, ya no se usa)
+  - Hacer diagnósticos condicionales con `#ifdef` en audio_task/feeder
 
 ---
 
@@ -205,6 +246,19 @@ Acceso via CDC (puerto COM/ttyUSB):
 - **Causa**: Gain insuficiente (+6dB @ 80Hz no audible)
 - **Solución**: Preset extremo (+12dB @ 100Hz, +20dB @ 1kHz test)
 - **Estado**: ✅ Test preset confirma DSP funcionando
+
+### **RESUELTO ✅**: Stream buffer overflow + data loss
+- **Problema**: ovf=300-600/2s overflow, blk=750/2s partial writes en I2S
+- **Causa 1**: `i2s_channel_write(..., 5)` → 5ms/10ms_per_tick = 0 ticks = non-blocking
+- **Causa 2**: `xStreamBufferSend(..., 0)` non-blocking → FIFO no acumula → feedback no regula host
+- **Solución**: Arquitectura space-check: audio_task verifica espacio antes de leer FIFO + feeder con retry loop + notificación entre tasks
+- **Estado**: ✅ ovf=0, blk=0, FIFO 40-91% estable
+
+### **RESUELTO ✅**: DSP ruido terrible @ 48kHz con presets
+- **Problema**: Ruido extremo al aplicar Rock/Jazz/Classical @ 48kHz (bypass OK)
+- **Causa**: Coeficientes pre-calculados `coeffs_48k` tenían b0/b1/b2 exactamente 2x demasiado altos (ganancia DC +37dB en vez de +12dB)
+- **Solución**: Eliminado path pre-calculado, siempre usar `biquad_calculate_coeffs()` dinámico
+- **Estado**: ✅ Todos los presets suenan correctamente
 
 ### **PENDIENTE ⚠️**: Crossfeed no implementado
 - **Problema**: Preset Headphone no hace nada (solo flat)
@@ -253,25 +307,17 @@ typedef struct {
 } preset_config_t;
 ```
 
-### **Coeficientes pre-calculados (RBJ Audio EQ Cookbook)**
+### **Coeficientes biquad (RBJ Audio EQ Cookbook)**
 
-Ejemplo Rock preset @ 48kHz:
-```c
-// Lowshelf @ 100Hz, +12dB, Q=0.7
-{
-    .b0 =  2.006588f,
-    .b1 = -3.973317f,
-    .b2 =  1.973094f,
-    .a1 = -1.986862f,
-    .a2 =  0.986949f,
-}
-```
-
-Calculados offline con:
-- omega = 2π × freq / fs
+Calculados dinámicamente por `biquad_calculate_coeffs()` en cada cambio de formato:
+- omega = 2pi x freq / fs
 - A = 10^(gain_db / 40)
-- alpha = sin(omega) / (2 × Q)
-- Formulas RBJ para cada tipo de filtro
+- alpha = sin(omega) / (2 x Q)
+- Formulas RBJ para cada tipo de filtro (lowshelf, highshelf, peaking, lowpass, highpass)
+- Normalización por a0 (divide b0/b1/b2/a1/a2 entre a0)
+
+**NOTA**: Los arrays `coeffs_48k` pre-calculados en `dsp_presets.c` tenian error 2x en b0/b1/b2.
+El path pre-calculado fue eliminado. Ahora siempre se usa calculo dinamico.
 
 ### **Soft Limiter (tanh)**
 
@@ -401,52 +447,63 @@ Ver `DSP_BUDGET_GUIDE.md` para más ejemplos.
 
 ## 🚀 Próximos Pasos Recomendados
 
-### **Mañana / Próxima sesión:**
+### **Próxima sesión:**
 
-1. **Implementar Crossfeed** (prioridad alta)
+1. **EQ Paramétrico 5 bandas** (feature principal de producto)
+   - Añadir API de control: `dsp_chain_set_band(band_idx, freq, gain_db, Q)`
+   - Integrar recálculo dinámico de coeficientes
+   - Testing con sweep de frecuencias
+
+2. **Crossfeed** (mejora auriculares)
    - Investigar algoritmo Chu Moy o Jan Meier
    - Crear `dsp_crossfeed.c` y `dsp_crossfeed.h`
    - Integrar en `dsp_chain.c`
-   - Testing con preset Headphone
 
-2. **Preparar para F2 (Display + UI)**
-   - Diseñar mockups de UI para DSP
-   - Planear integración LVGL
-   - Definir widgets necesarios (sliders, medidor CPU, selector presets)
-
-3. **Testing exhaustivo DSP**
-   - Probar todos los presets con diferentes sample rates
-   - Verificar que no hay stuttering @ 384kHz
-   - Medir CPU usage real vs estimado
-   - Testing con música variada (bass-heavy, vocal, classical)
+3. **Balance L/R** (implementación trivial)
+   - Añadir a `dsp_chain_t`: `float balance_l`, `float balance_r`
+   - Aplicar después de EQ, antes de limiter
 
 ### **A medio plazo:**
 
-1. **NVS Storage** para presets personalizados
-2. **Pre-calcular coeffs** para 44.1k, 96k, 192k, 384k
-3. **Más presets** predefinidos (Pop, Metal, Electronic, etc.)
-4. **DRC** (Dynamic Range Compression) para sample rates ≤192kHz
+1. **Loudness compensation** (Fletcher-Munson)
+2. **NVS Storage** para guardar presets de usuario
+3. **Preparar UI** (cuando F2 esté lista) - sliders EQ, selector presets, medidor CPU
+4. **Más presets** predefinidos (Pop, Metal, Electronic, Vocal, Acoustic)
 
 ### **Hardware (cuando llegue ES9039Q2M):**
 
 1. Migrar de ES8311 a ES9039Q2M
-2. Configurar SPI control del DAC
-3. Testing con hardware final
-4. Ajustar MCLK para 384kHz (24.576 MHz)
+2. Driver I2C para control del DAC
+3. Implementar selector de filtro digital del DAC (7 opciones)
+4. Testing con hardware final
+5. Ajustar MCLK para 384kHz (49.15 MHz con MCLK×128)
 
 ---
+
+## 📊 Arquitectura Audio Pipeline (Actual)
+
+```
+USB Host → TinyUSB FIFO (12.5KB) → audio_task (DSP) → StreamBuffer (16KB) → i2s_feeder_task → I2S DMA → DAC
+                ↑                        ↓ space-check                              ↓ notify
+                └── async feedback ←── FIFO level                              xTaskNotifyGive()
+```
+
+- **audio_task** (prio 5, core 1, 12KB stack): Lee FIFO solo si hay espacio en stream buffer, aplica DSP, escribe non-blocking
+- **i2s_feeder_task** (prio 4, core 1, 8KB stack): Lee stream buffer, escribe I2S con retry loop (timeout 100ms), notifica audio_task
+- **Resultado**: ovf=0, blk=0, FIFO 40-91%, loop=220us
 
 ## ✅ Checklist de Continuación
 
-Antes de continuar con F2 o F4, verificar:
-
-- [ ] **DSP compilando sin warnings** ✅ (ya está)
-- [ ] **Test preset funcionando** ✅ (ya está)
-- [ ] **Documentación actualizada** ✅ (README + TODO + GUIDE)
+- [x] **DSP compilando sin warnings**
+- [x] **Presets funcionando correctamente** (coeficientes dinámicos)
+- [x] **Pipeline estable** (zero overflow, zero data loss)
+- [x] **Formato switching** (192kHz ↔ 48kHz sin problemas)
+- [ ] **EQ Paramétrico 5 bandas** ⏸️ (siguiente feature)
 - [ ] **Crossfeed implementado** ⏸️ (pendiente)
+- [ ] **Loudness compensation** ⏸️ (pendiente)
 - [ ] **NVS storage** ⏸️ (pendiente)
-- [ ] **Testing exhaustivo** ⏸️ (por hacer)
+- [ ] **Limpieza código legacy** ⏸️ (coeffs_48k muertos, diagnósticos)
 
 ---
 
-**Fin del TODO - Actualizar según progreso** 📝
+**Fin del TODO - Actualizar según progreso**

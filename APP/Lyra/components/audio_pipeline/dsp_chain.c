@@ -90,13 +90,16 @@ __attribute__((hot, always_inline))
 static inline float soft_limit(float sample)
 {
 #if SOFT_LIMITER_ENABLED
-    // Fast tanh approximation for soft clipping
-    // More accurate than simple clipping, prevents harsh distortion
-    if (fabsf(sample) > SOFT_LIMITER_THRESHOLD) {
-        // Apply tanh limiting for samples above threshold
-        return tanhf(sample * 0.9f) / 0.9f;
-    }
-    return sample;
+    // Soft limiter: linear below threshold, tanh compression above.
+    // Continuous at threshold (no discontinuity), output never exceeds ±1.0.
+    // Maps excess above threshold through tanh scaled to remaining headroom.
+    float abs_s = fabsf(sample);
+    if (abs_s <= SOFT_LIMITER_THRESHOLD) return sample;
+
+    float sign = (sample >= 0.0f) ? 1.0f : -1.0f;
+    float excess = abs_s - SOFT_LIMITER_THRESHOLD;
+    float headroom = 1.0f - SOFT_LIMITER_THRESHOLD;
+    return sign * (SOFT_LIMITER_THRESHOLD + headroom * tanhf(excess / headroom));
 #else
     // Hard clipping (old behavior)
     if (sample > 1.0f) return 1.0f;
@@ -217,6 +220,9 @@ void dsp_chain_update_format(dsp_chain_t *chain, const audio_format_t *format)
 
     // Reload current preset with new sample rate
     dsp_chain_load_preset(chain, chain->current_preset);
+
+    // Reset filter state to prevent transients from previous format
+    dsp_chain_reset(chain);
 }
 
 void dsp_chain_reset(dsp_chain_t *chain)
