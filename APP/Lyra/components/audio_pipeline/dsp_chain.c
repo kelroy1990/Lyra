@@ -50,34 +50,12 @@ bool dsp_chain_load_preset(dsp_chain_t *chain, eq_preset_t preset)
     // Clear existing filters
     chain->num_biquads = 0;
 
-    // Load biquad filters from preset
+    // Load biquad filters from preset — always calculate dynamically
+    // (pre-calculated coeffs_48k had 2x gain error on b0/b1/b2)
     for (uint8_t i = 0; i < config->num_filters && i < DSP_MAX_BIQUADS; i++) {
-        // Check if we have pre-calculated coefficients for 48kHz
-        bool use_precalc = (chain->format.sample_rate == 48000) && (config->coeffs_48k != NULL);
-
-        if (use_precalc) {
-            // Fast path: Use pre-calculated coefficients (no sin/cos/pow/sqrt)
-            biquad_filter_t *filter = &chain->biquads[i];
-            memset(filter, 0, sizeof(biquad_filter_t));
-
-            // Copy pre-calculated coefficients directly
-            const biquad_coeffs_t *coeffs = &config->coeffs_48k[i];
-            filter->b0 = coeffs->b0;
-            filter->b1 = coeffs->b1;
-            filter->b2 = coeffs->b2;
-            filter->a1 = coeffs->a1;
-            filter->a2 = coeffs->a2;
-
-            ESP_LOGD(TAG, "  Filter %d: Using pre-calculated coefficients (48kHz)", i);
-        } else {
-            // Slow path: Calculate coefficients dynamically
-            biquad_params_t params = config->filters[i];
-            params.sample_rate = chain->format.sample_rate;
-            biquad_init(&chain->biquads[i], &params);
-
-            ESP_LOGD(TAG, "  Filter %d: type=%d, freq=%.1f Hz, gain=%.1f dB, Q=%.2f",
-                     i, params.type, params.freq, params.gain, params.q);
-        }
+        biquad_params_t params = config->filters[i];
+        params.sample_rate = chain->format.sample_rate;
+        biquad_init(&chain->biquads[i], &params);
 
         chain->num_biquads++;
     }

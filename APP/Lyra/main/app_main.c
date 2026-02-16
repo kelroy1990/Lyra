@@ -8,6 +8,7 @@
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/stream_buffer.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_check.h"
@@ -23,8 +24,45 @@
 #include "storage.h"
 #include "usb_mode.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 
 static const char *TAG = "lyra";
+
+//--------------------------------------------------------------------+
+// Audio task handle (global for ISR notification)
+//--------------------------------------------------------------------+
+
+static TaskHandle_t s_audio_task_handle = NULL;
+
+//--------------------------------------------------------------------+
+// Decoupled audio pipeline: USB FIFO → DSP → StreamBuffer → I2S DMA
+//--------------------------------------------------------------------+
+
+#define AUDIO_STREAM_BUF_SIZE  (16 * 1024)  // 16KB ring: 5ms@384kHz, 10ms@192kHz
+
+static StreamBufferHandle_t s_audio_stream = NULL;
+static TaskHandle_t s_feeder_task_handle = NULL;
+static volatile bool s_i2s_reconfiguring = false;
+static volatile bool s_feeder_in_write = false;
+
+//--------------------------------------------------------------------+
+// Audio diagnostics (temporary - remove after verification)
+//--------------------------------------------------------------------+
+
+static volatile struct {
+    uint32_t isr_rx_count;       // USB audio packets received (from ISR)
+    uint32_t fifo_min;           // Min tud_audio_available() between logs
+    uint32_t fifo_max;           // Max tud_audio_available() between logs
+    uint32_t i2s_block_count;    // Times i2s bytes_written < requested (feeder)
+    uint32_t i2s_write_max_us;   // Max time in i2s_channel_write() (feeder)
+    uint32_t dsp_max_us;         // Max time in audio_pipeline_process()
+    uint32_t loop_max_us;        // Max time for full cycle (read+dsp+stream_write)
+    uint32_t zero_reads;         // Times FIFO was empty (idle cycles)
+    uint32_t total_reads;        // Total successful reads
+    uint32_t stream_min;         // Min bytes in stream buffer
+    uint32_t stream_max;         // Max bytes in stream buffer
+    uint32_t stream_overflow;    // Times stream buffer was full
+} s_diag;
 
 //--------------------------------------------------------------------+
 // Hardware pins (ESP32-P4 eval board + ES8311)
@@ -300,8 +338,8 @@ static void i2s_output_init(uint32_t sample_rate, uint8_t bits_per_sample)
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     chan_cfg.auto_clear_after_cb = true;
-    chan_cfg.dma_desc_num = 6;
-    chan_cfg.dma_frame_num = 240;
+    chan_cfg.dma_desc_num = 8;
+    chan_cfg.dma_frame_num = 480;
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &i2s_tx, NULL));
 
     i2s_std_config_t std_cfg = {
@@ -351,9 +389,16 @@ static int32_t  current_volume[3]   = {0, 0, 0};
 static bool     current_mute[3]     = {false, false, false};
 static volatile bool format_changed = false;
 
-bool tud_audio_rx_done_pre_read(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting)
+// Called from USB ISR when audio data arrives — wake audio_task via notification
+bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting)
 {
     (void)rhport; (void)n_bytes_received; (void)func_id; (void)ep_out; (void)cur_alt_setting;
+    s_diag.isr_rx_count++;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (s_audio_task_handle) {
+        vTaskNotifyGiveFromISR(s_audio_task_handle, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
     return true;
 }
 
@@ -540,12 +585,59 @@ void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt, audio_feedback_p
 // Audio task: USB FIFO → I2S
 //--------------------------------------------------------------------+
 
+//--------------------------------------------------------------------+
+// I2S feeder task: StreamBuffer → I2S DMA (blocks on DMA, not USB)
+//--------------------------------------------------------------------+
+
+static void i2s_feeder_task(void *arg)
+{
+    (void)arg;
+    // Buffer sized to one DMA descriptor max (480 frames × 4 bytes × 2 ch)
+    uint8_t feed_buf[3840];
+
+    while (1) {
+        if (s_i2s_reconfiguring || !i2s_tx) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        // Block until data available (trigger=1 byte), timeout=1 tick safety
+        size_t received = xStreamBufferReceive(s_audio_stream, feed_buf, sizeof(feed_buf), 1);
+        if (received > 0) {
+            s_feeder_in_write = true;
+            uint32_t t0 = esp_timer_get_time();
+            // Retry loop: write ALL bytes to I2S, waiting for DMA space as needed
+            // Timeout=100ms (10 ticks @100Hz) — enough for DMA to free descriptors
+            size_t offset = 0;
+            while (offset < received && !s_i2s_reconfiguring) {
+                size_t bytes_written;
+                i2s_channel_write(i2s_tx, feed_buf + offset, received - offset, &bytes_written, 100);
+                offset += bytes_written;
+                if (bytes_written == 0) break; // real timeout, avoid infinite loop
+            }
+            uint32_t us = esp_timer_get_time() - t0;
+            s_feeder_in_write = false;
+
+            if (us > s_diag.i2s_write_max_us) s_diag.i2s_write_max_us = us;
+            if (offset < received) s_diag.i2s_block_count++;
+
+            // Notify audio_task: stream buffer has space now
+            if (s_audio_task_handle) xTaskNotifyGive(s_audio_task_handle);
+        }
+    }
+}
+
+//--------------------------------------------------------------------+
+// Audio task: USB FIFO → DSP → StreamBuffer (never blocks on I2S)
+//--------------------------------------------------------------------+
+
 static void audio_task(void *arg)
 {
     (void)arg;
-    uint8_t spk_buf[CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX];
-    uint32_t total_bytes = 0;
-    // uint32_t last_log_tick = 0;
+    uint8_t spk_buf[CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX * 8];
+    uint32_t last_diag_us = 0;
+    s_diag.fifo_min = UINT32_MAX;
+    s_diag.stream_min = UINT32_MAX;
 
     while (1) {
         // Sleep when USB is not in audio mode (e.g. storage mode)
@@ -564,53 +656,115 @@ static void audio_task(void *arg)
                 ESP_LOGI(TAG, "Format change requested: %d-bit", current_bits_per_sample);
                 format_changed = false;
             }
-            // Reconfigure ONLY I2S with new settings (only if streaming is active)
-            if (current_bits_per_sample > 0) {  // Only if streaming is active (alt != 0)
-                i2s_output_init(current_sample_rate, current_bits_per_sample);
+            if (current_bits_per_sample > 0) {
+                // Pause feeder task while reconfiguring I2S
+                s_i2s_reconfiguring = true;
+                while (s_feeder_in_write) vTaskDelay(1);
 
-                // Update audio pipeline with new format
+                i2s_output_init(current_sample_rate, current_bits_per_sample);
                 audio_pipeline_update_format(current_sample_rate, current_bits_per_sample);
 
+                // Discard stale audio data from old format
+                xStreamBufferReset(s_audio_stream);
+
+                s_i2s_reconfiguring = false;
                 ESP_LOGI(TAG, "Audio format reconfigured: %lu Hz, %d-bit",
                          current_sample_rate, current_bits_per_sample);
-                // Note: ES8311 DAC initialized with 32-bit can handle 16/24/32-bit without reconfiguration
             }
+        }
+
+        // Check stream buffer space BEFORE reading FIFO
+        // If no space: don't drain FIFO → FIFO fills → feedback slows host
+        size_t stream_space = xStreamBufferSpacesAvailable(s_audio_stream);
+        if (stream_space < CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX) {
+            // No space in stream buffer — sleep until feeder or ISR wakes us
+            s_diag.zero_reads++;
+            ulTaskNotifyTake(pdTRUE, 1);
+            continue;
         }
 
         uint16_t available = tud_audio_available();
         if (available > 0) {
-            // Data available: process it immediately
-            uint16_t to_read = (available < sizeof(spk_buf)) ? available : sizeof(spk_buf);
+            // Track USB FIFO levels
+            if (available < s_diag.fifo_min) s_diag.fifo_min = available;
+            if (available > s_diag.fifo_max) s_diag.fifo_max = available;
+            s_diag.total_reads++;
+
+            uint32_t t_loop = esp_timer_get_time();
+
+            // Limit read to available stream space
+            uint16_t max_read = (stream_space < sizeof(spk_buf)) ? stream_space : sizeof(spk_buf);
+            uint16_t to_read = (available < max_read) ? available : max_read;
             uint16_t n_read = tud_audio_read(spk_buf, to_read);
-            if (n_read > 0 && i2s_tx) {
-                // Process audio through DSP chain (EQ, filters, etc.)
-                // Buffer is int32 stereo interleaved (L,R,L,R,...)
-                int32_t *buf_i32 = (int32_t*)spk_buf;
-                uint32_t frames = n_read / (2 * 4);  // 2 channels, 4 bytes per sample
+            if (n_read > 0) {
+                // DSP processing
+                uint8_t bytes_per_sample = (current_bits_per_sample == 16) ? 2 : 4;
+                uint32_t frame_size = bytes_per_sample * 2;
+                uint32_t frames = n_read / frame_size;
+                uint32_t num_samples = frames * 2;
 
-                audio_pipeline_process(buf_i32, frames);
+                uint32_t t_dsp = esp_timer_get_time();
+                if (bytes_per_sample == 2) {
+                    int16_t *src = (int16_t*)spk_buf;
+                    int32_t dsp_buf[sizeof(spk_buf) / 2];
+                    for (uint32_t i = 0; i < num_samples; i++)
+                        dsp_buf[i] = (int32_t)src[i] << 16;
+                    audio_pipeline_process(dsp_buf, frames);
+                    for (uint32_t i = 0; i < num_samples; i++)
+                        src[i] = (int16_t)(dsp_buf[i] >> 16);
+                } else {
+                    int32_t *buf_i32 = (int32_t*)spk_buf;
+                    audio_pipeline_process(buf_i32, frames);
+                }
+                uint32_t dsp_us = esp_timer_get_time() - t_dsp;
+                if (dsp_us > s_diag.dsp_max_us) s_diag.dsp_max_us = dsp_us;
 
-                // Send processed audio to I2S -> DAC
-                size_t bytes_written;
-                i2s_channel_write(i2s_tx, spk_buf, n_read, &bytes_written, 10);
-                total_bytes += bytes_written;
+                // Non-blocking write — space guaranteed by check above
+                size_t sent = xStreamBufferSend(s_audio_stream, spk_buf, n_read, 0);
+                if (sent < (size_t)n_read) s_diag.stream_overflow++;
             }
+
+            uint32_t loop_us = esp_timer_get_time() - t_loop;
+            if (loop_us > s_diag.loop_max_us) s_diag.loop_max_us = loop_us;
         } else {
-            // No data: yield CPU to IDLE1 task
-            // This task runs on CPU 1 (dedicated), so it won't interfere with
-            // IDLE0 watchdog on CPU 0. Simple taskYIELD() provides minimum latency
-            // while still allowing IDLE1 to run for watchdog reset.
-            taskYIELD();
+            s_diag.zero_reads++;
+            ulTaskNotifyTake(pdTRUE, 1);
         }
 
-        // // Log audio stats every 2 seconds
-        // uint32_t now = xTaskGetTickCount();
-        // if (now - last_log_tick >= pdMS_TO_TICKS(2000)) {
-            // ESP_LOGI(TAG, "Audio: %lu bytes written to I2S, i2s_tx=%s",
-                    //  total_bytes, i2s_tx ? "OK" : "NULL");
-        //     total_bytes = 0;
-        //     last_log_tick = now;
-        // }
+        // Track stream buffer fill level
+        size_t stream_used = xStreamBufferBytesAvailable(s_audio_stream);
+        if (stream_used < s_diag.stream_min) s_diag.stream_min = stream_used;
+        if (stream_used > s_diag.stream_max) s_diag.stream_max = stream_used;
+
+        // Diagnostics log every 2 seconds
+        uint32_t now_us = esp_timer_get_time();
+        if (now_us - last_diag_us >= 2000000) {
+            if (s_diag.total_reads > 0) {
+                ESP_LOGI(TAG, "[AUDIO DIAG] FIFO min=%lu max=%lu | stream min=%lu max=%lu ovf=%lu | "
+                              "I2S blk=%lu wrMax=%luus | DSP=%luus loop=%luus | rd=%lu idle=%lu | ISR=%lu/2s",
+                         (s_diag.fifo_min == UINT32_MAX) ? 0 : s_diag.fifo_min,
+                         s_diag.fifo_max,
+                         (s_diag.stream_min == UINT32_MAX) ? 0 : s_diag.stream_min,
+                         s_diag.stream_max, s_diag.stream_overflow,
+                         s_diag.i2s_block_count, s_diag.i2s_write_max_us,
+                         s_diag.dsp_max_us, s_diag.loop_max_us,
+                         s_diag.total_reads, s_diag.zero_reads,
+                         s_diag.isr_rx_count);
+            }
+            s_diag.fifo_min = UINT32_MAX;
+            s_diag.fifo_max = 0;
+            s_diag.stream_min = UINT32_MAX;
+            s_diag.stream_max = 0;
+            s_diag.stream_overflow = 0;
+            s_diag.i2s_block_count = 0;
+            s_diag.i2s_write_max_us = 0;
+            s_diag.dsp_max_us = 0;
+            s_diag.loop_max_us = 0;
+            s_diag.total_reads = 0;
+            s_diag.zero_reads = 0;
+            s_diag.isr_rx_count = 0;
+            last_diag_us = now_us;
+        }
     }
 }
 
@@ -1291,14 +1445,20 @@ void app_main(void)
     ESP_LOGI(TAG, "Waiting for USB enumeration...");
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    // 5. Tasks
+    // 5. Audio stream buffer (decouples USB drain from I2S DMA blocking)
+    s_audio_stream = xStreamBufferCreate(AUDIO_STREAM_BUF_SIZE, 1);
+    assert(s_audio_stream);
+
+    // 6. Tasks
     // CPU 0: USB stack (TinyUSB), CDC, and system tasks
     xTaskCreatePinnedToCore(tusb_device_task, "TinyUSB", 16384, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(cdc_task, "cdc", 4096, NULL, 3, NULL, 0);
 
-    // CPU 1: Dedicated audio processing for minimum latency
-    static TaskHandle_t audio_task_handle;
-    xTaskCreatePinnedToCore(audio_task, "audio", 8192, NULL, 4, &audio_task_handle, 1);
+    // CPU 1: Audio pipeline (prio 5) + I2S feeder (prio 4)
+    // audio_task has higher priority: must drain USB FIFO promptly to avoid overflow
+    // feeder_task runs when audio_task sleeps: feeds I2S DMA from stream buffer
+    xTaskCreatePinnedToCore(audio_task, "audio", 12288, NULL, 5, &s_audio_task_handle, 1);
+    xTaskCreatePinnedToCore(i2s_feeder_task, "i2s_feed", 8192, NULL, 4, &s_feeder_task_handle, 1);
 
     ESP_LOGI(TAG, "Lyra ready - USB Audio 2.0 -> ES8311 DAC");
 }
