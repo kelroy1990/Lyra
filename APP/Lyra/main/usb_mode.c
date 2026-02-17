@@ -67,7 +67,15 @@ esp_err_t usb_mode_switch(usb_mode_t new_mode)
     // --- Post-switch setup ---
     if (new_mode == USB_MODE_STORAGE) {
         // Entering storage: enable MSC raw block access
-        storage_usb_msc_enable();
+        esp_err_t msc_ret = storage_usb_msc_enable();
+        if (msc_ret != ESP_OK) {
+            ESP_LOGE(TAG, "MSC enable failed (%s) — aborting switch, reverting to AUDIO",
+                     esp_err_to_name(msc_ret));
+            g_usb_mode = USB_MODE_AUDIO;
+            audio_source_switch(AUDIO_SOURCE_USB, 0, 0);
+            tud_connect();
+            return msc_ret;
+        }
     }
 
     if (new_mode == USB_MODE_AUDIO) {

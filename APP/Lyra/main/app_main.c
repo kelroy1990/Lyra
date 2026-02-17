@@ -26,6 +26,7 @@
 #include "usb_mode.h"
 #include "audio_source.h"
 #include "sd_player.h"
+#include "audio_codecs.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
@@ -324,8 +325,10 @@ static void codec_init(void)
 // I2S Output
 //--------------------------------------------------------------------+
 
-void i2s_output_init(uint32_t sample_rate, uint8_t bits_per_sample)
+uint32_t i2s_output_init(uint32_t sample_rate, uint8_t bits_per_sample)
 {
+    ESP_LOGI(TAG, "[I2S] Init requested: %lu Hz, %d-bit", sample_rate, bits_per_sample);
+
     if (i2s_tx) {
         i2s_channel_disable(i2s_tx);
         i2s_del_channel(i2s_tx);
@@ -351,11 +354,22 @@ void i2s_output_init(uint32_t sample_rate, uint8_t bits_per_sample)
     chan_cfg.dma_frame_num = 480;
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &i2s_tx, NULL));
 
+    // MCLK = sample_rate × multiplier.  APLL max usable = 62.5 MHz.
+    // Dev board (ES8311):   always ×256, 384 kHz not supported (fallback to 48k)
+    // Final board (ES9039Q2M): ×128 for >192 kHz (384k×128=49.15 MHz ≤ 50 MHz max)
+#ifdef LYRA_FINAL_BOARD
+    i2s_mclk_multiple_t mclk_mult = (sample_rate > 192000)
+                                   ? I2S_MCLK_MULTIPLE_128
+                                   : I2S_MCLK_MULTIPLE_256;
+#else
+    i2s_mclk_multiple_t mclk_mult = I2S_MCLK_MULTIPLE_256;
+#endif
+
     i2s_std_config_t std_cfg = {
         .clk_cfg = {
             .sample_rate_hz = sample_rate,
             .clk_src = I2S_CLK_SRC_APLL,
-            .mclk_multiple = I2S_MCLK_MULTIPLE_256,
+            .mclk_multiple = mclk_mult,
         },
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(i2s_bits, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
@@ -370,18 +384,21 @@ void i2s_output_init(uint32_t sample_rate, uint8_t bits_per_sample)
 
     esp_err_t ret = i2s_channel_init_std_mode(i2s_tx, &std_cfg);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2S init failed for %lu Hz, %d-bit (err 0x%x), falling back to 48000 Hz, 32-bit",
+        ESP_LOGE(TAG, "[I2S] Init FAILED for %lu Hz, %d-bit (err 0x%x) → fallback 48000 Hz",
                  sample_rate, bits_per_sample, ret);
         i2s_del_channel(i2s_tx);
         i2s_tx = NULL;
         if (sample_rate != 48000 || bits_per_sample != 32) {
-            i2s_output_init(48000, 32);
+            return i2s_output_init(48000, 32);
         }
-        return;
+        return 0;  // total failure
     }
     ESP_ERROR_CHECK(i2s_channel_enable(i2s_tx));
-    ESP_LOGI(TAG, "I2S output: %lu Hz, %d-bit stereo, MCLK=%luHz",
-             sample_rate, bits_per_sample, sample_rate * 256);
+    uint32_t mclk_hz = sample_rate * (mclk_mult == I2S_MCLK_MULTIPLE_128 ? 128 : 256);
+    ESP_LOGI(TAG, "[I2S] OK: %lu Hz, %d-bit stereo, MCLK=%luHz (x%d)",
+             sample_rate, bits_per_sample, mclk_hz,
+             mclk_mult == I2S_MCLK_MULTIPLE_128 ? 128 : 256);
+    return sample_rate;
 }
 
 //--------------------------------------------------------------------+
@@ -671,15 +688,16 @@ static void audio_task(void *arg)
                 s_i2s_reconfiguring = true;
                 while (s_feeder_in_write) vTaskDelay(1);
 
-                i2s_output_init(current_sample_rate, current_bits_per_sample);
-                audio_pipeline_update_format(current_sample_rate, current_bits_per_sample);
+                uint32_t actual_rate = i2s_output_init(current_sample_rate, current_bits_per_sample);
+                if (actual_rate == 0) actual_rate = current_sample_rate;
+                audio_pipeline_update_format(actual_rate, current_bits_per_sample);
 
                 // Discard stale audio data from old format
                 xStreamBufferReset(s_audio_stream);
 
                 s_i2s_reconfiguring = false;
-                ESP_LOGI(TAG, "Audio format reconfigured: %lu Hz, %d-bit",
-                         current_sample_rate, current_bits_per_sample);
+                ESP_LOGI(TAG, "Audio format reconfigured: requested=%lu actual=%lu Hz, %d-bit",
+                         current_sample_rate, actual_rate, current_bits_per_sample);
             }
         }
 
@@ -999,6 +1017,88 @@ static void sd_cmd_cat(const char *arg)
     fclose(f);
 }
 
+// Lightweight WAV header reader (no codec_open — safe for 4KB CDC stack)
+static void sd_cmd_info(const char *arg)
+{
+    if (!storage_is_mounted()) { cdc_printf("SD not mounted\r\n"); return; }
+    if (*arg == '\0') { cdc_printf("Usage: sd info <file>\r\n"); return; }
+    char path[160];
+    sd_build_path(path, sizeof(path), arg);
+
+    struct stat fst;
+    if (stat(path, &fst) != 0) {
+        cdc_printf("Cannot stat: %s\r\n", arg);
+        return;
+    }
+
+    double size_mb = (double)fst.st_size / (1024.0 * 1024.0);
+    cdc_printf("File: %s (%.1f MB)\r\n", arg, size_mb);
+
+    // Detect format from extension
+    codec_format_t fmt = codec_detect_format(path);
+    if (fmt == CODEC_FORMAT_UNKNOWN) {
+        cdc_printf("  (unknown format)\r\n");
+        return;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) { cdc_printf("  Cannot open\r\n"); return; }
+
+    if (fmt == CODEC_FORMAT_WAV) {
+        // Read WAV header (44 bytes standard RIFF/WAVE PCM)
+        uint8_t hdr[44];
+        if (fread(hdr, 1, 44, f) < 44) {
+            cdc_printf("  WAV header too short\r\n");
+            fclose(f);
+            return;
+        }
+        // Parse: bytes 22-23=channels, 24-27=sample_rate, 34-35=bits_per_sample
+        uint16_t channels   = hdr[22] | (hdr[23] << 8);
+        uint32_t sample_rate = hdr[24] | (hdr[25] << 8) | (hdr[26] << 16) | (hdr[27] << 24);
+        uint16_t bits       = hdr[34] | (hdr[35] << 8);
+        uint16_t audio_fmt  = hdr[20] | (hdr[21] << 8);
+
+        // Data size: find "data" chunk (usually at offset 36, but skip if fmt chunk is extended)
+        uint32_t data_size = 0;
+        // Try standard position first
+        if (hdr[36] == 'd' && hdr[37] == 'a' && hdr[38] == 't' && hdr[39] == 'a') {
+            data_size = hdr[40] | (hdr[41] << 8) | (hdr[42] << 16) | (hdr[43] << 24);
+        } else {
+            // Scan for "data" chunk (extended fmt or extra chunks)
+            fseek(f, 12, SEEK_SET);  // after RIFF header
+            uint8_t chunk[8];
+            while (fread(chunk, 1, 8, f) == 8) {
+                uint32_t chunk_size = chunk[4] | (chunk[5] << 8) | (chunk[6] << 16) | (chunk[7] << 24);
+                if (chunk[0] == 'd' && chunk[1] == 'a' && chunk[2] == 't' && chunk[3] == 'a') {
+                    data_size = chunk_size;
+                    break;
+                }
+                fseek(f, chunk_size, SEEK_CUR);
+            }
+        }
+
+        uint32_t frame_size = channels * (bits / 8);
+        uint64_t total_frames = frame_size > 0 ? data_size / frame_size : 0;
+        uint32_t duration_s = sample_rate > 0 ? (uint32_t)(total_frames / sample_rate) : 0;
+
+        cdc_printf("  Format: WAV %s\r\n", audio_fmt == 1 ? "PCM" :
+                   audio_fmt == 3 ? "Float" : "compressed");
+        cdc_printf("  Sample rate: %lu Hz\r\n", sample_rate);
+        cdc_printf("  Bit depth: %u-bit\r\n", bits);
+        cdc_printf("  Channels: %u (%s)\r\n", channels, channels == 1 ? "mono" : "stereo");
+        cdc_printf("  Duration: %lu:%02lu\r\n", duration_s / 60, duration_s % 60);
+        if (sample_rate > 0 && bits > 0) {
+            uint32_t bitrate_kbps = (sample_rate * bits * channels) / 1000;
+            cdc_printf("  Bitrate: %lu kbps\r\n", bitrate_kbps);
+        }
+    } else {
+        cdc_printf("  Format: %s (use 'play' for detailed info)\r\n",
+                   fmt == CODEC_FORMAT_FLAC ? "FLAC" : "MP3");
+    }
+
+    fclose(f);
+}
+
 static void sd_cmd_mv(const char *arg)
 {
     if (!storage_is_mounted()) { cdc_printf("SD not mounted\r\n"); return; }
@@ -1185,6 +1285,11 @@ static bool handle_sd_command(const char *cmd)
         return true;
     }
 
+    if (strncmp(cmd, "sd info ", 8) == 0) {
+        sd_cmd_info(cmd + 8);
+        return true;
+    }
+
     if (strncmp(cmd, "sd mv ", 6) == 0) {
         sd_cmd_mv(cmd + 6);
         return true;
@@ -1314,6 +1419,7 @@ static void cdc_task(void *arg)
                         tud_cdc_write_str("  sd ls [path]  - List directory\r\n");
                         tud_cdc_write_str("  sd tree [path]- Directory tree\r\n");
                         tud_cdc_write_str("  sd cat <file> - Show file contents\r\n");
+                        tud_cdc_write_str("  sd info <file>- Audio file info\r\n");
                         tud_cdc_write_str("  sd mkdir <dir>- Create directory\r\n");
                         tud_cdc_write_str("  sd rm <file>  - Delete file\r\n");
                         tud_cdc_write_str("  sd rmdir <dir>- Delete empty dir\r\n");

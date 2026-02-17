@@ -6,7 +6,7 @@
 
 static const char *TAG = "playlist";
 
-static const char *AUDIO_EXTENSIONS[] = { ".wav", ".flac", ".mp3", NULL };
+static const char *AUDIO_EXTENSIONS[] = { ".wav", ".flac", ".mp3", ".cue", NULL };
 
 static bool is_audio_file(const char *name)
 {
@@ -22,6 +22,32 @@ static bool is_audio_file(const char *name)
 static int cmp_strings(const void *a, const void *b)
 {
     return strcasecmp(*(const char **)a, *(const char **)b);
+}
+
+// Check if name is a .cue file
+static bool is_cue_file(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    return dot && strcasecmp(dot, ".cue") == 0;
+}
+
+// Check if an audio file has a matching .cue in the list → should be hidden
+static bool has_matching_cue(const char *audio_name, char **names, int count)
+{
+    const char *dot = strrchr(audio_name, '.');
+    if (!dot) return false;
+    size_t base_len = dot - audio_name;
+
+    for (int i = 0; i < count; i++) {
+        if (!names[i]) continue;
+        const char *cdot = strrchr(names[i], '.');
+        if (!cdot || strcasecmp(cdot, ".cue") != 0) continue;
+        size_t cbase_len = cdot - names[i];
+        if (cbase_len == base_len && strncasecmp(audio_name, names[i], base_len) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 int sd_playlist_scan(const char *folder_path, char **names_out, int max_tracks)
@@ -47,6 +73,17 @@ int sd_playlist_scan(const char *folder_path, char **names_out, int max_tracks)
         }
     }
     closedir(dir);
+
+    // Dedup: if album.cue exists, hide album.wav/album.flac/album.mp3
+    for (int i = 0; i < count; i++) {
+        if (!is_cue_file(names_out[i]) && has_matching_cue(names_out[i], names_out, count)) {
+            free(names_out[i]);
+            names_out[i] = names_out[count - 1];
+            names_out[count - 1] = NULL;
+            count--;
+            i--;  // re-check swapped entry
+        }
+    }
 
     ESP_LOGI(TAG, "Scanned %s: %d audio files", folder_path, count);
     return count;

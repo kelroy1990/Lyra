@@ -48,7 +48,7 @@ static int32_t wav_decode(codec_handle_t *h, int32_t *buffer, uint32_t max_frame
 
     if (h->info.channels == 1) {
         // Mono: decode into temp, then expand to stereo
-        static drwav_int32 mono_buf[480];
+        static drwav_int32 mono_buf[1024];
         drwav_uint64 frames = drwav_read_pcm_frames_s32(wav, max_frames, mono_buf);
         for (uint32_t i = 0; i < (uint32_t)frames; i++) {
             buffer[i * 2]     = (int32_t)mono_buf[i];

@@ -45,6 +45,7 @@ codec_handle_t *codec_open(const char *filepath)
         ESP_LOGE(TAG, "Cannot open: %s", filepath);
         return NULL;
     }
+    setvbuf(f, NULL, _IOFBF, 32768);  // 32KB read-ahead buffer for SD throughput
 
     codec_handle_t *h = calloc(1, sizeof(codec_handle_t));
     if (!h) {

@@ -27,9 +27,32 @@ void audio_source_switch(audio_source_t new_source,
                          uint8_t new_bits_per_sample)
 {
     audio_source_t old = s_current_source;
-    if (old == new_source) return;
-
     const char *names[] = { "NONE", "USB", "SD" };
+
+    // Same source — only reconfigure I2S if format actually changed
+    if (old == new_source) {
+        if (new_sample_rate > 0 && new_bits_per_sample > 0) {
+            uint32_t cur_rate;
+            uint8_t  cur_bits;
+            audio_pipeline_get_format(&cur_rate, &cur_bits);
+            if (cur_rate != new_sample_rate || cur_bits != new_bits_per_sample) {
+                ESP_LOGI(TAG, "Reconfig I2S (same source %s): %lu→%lu Hz, %d→%d bit",
+                         names[old], cur_rate, new_sample_rate, cur_bits, new_bits_per_sample);
+                audio_set_reconfiguring(true);
+                while (audio_is_feeder_writing()) vTaskDelay(1);
+                StreamBufferHandle_t stream = audio_get_stream_buffer();
+                if (stream) xStreamBufferReset(stream);
+                uint32_t actual_rate = i2s_output_init(new_sample_rate, new_bits_per_sample);
+                if (actual_rate == 0) actual_rate = new_sample_rate;  // safety
+                audio_pipeline_update_format(actual_rate, new_bits_per_sample);
+                audio_set_reconfiguring(false);
+                ESP_LOGI(TAG, "Reconfig done: requested=%lu actual=%lu Hz",
+                         new_sample_rate, actual_rate);
+            }
+        }
+        return;
+    }
+
     ESP_LOGI(TAG, "Switching audio source: %s -> %s", names[old], names[new_source]);
 
     // When leaving USB, save current I2S format (so we can restore when returning)
@@ -65,10 +88,12 @@ void audio_source_switch(audio_source_t new_source,
     // Step 4: Reconfigure I2S + DSP if format changed
     if (new_sample_rate > 0 && new_bits_per_sample > 0) {
         audio_set_reconfiguring(true);
-        i2s_output_init(new_sample_rate, new_bits_per_sample);
-        audio_pipeline_update_format(new_sample_rate, new_bits_per_sample);
+        uint32_t actual_rate = i2s_output_init(new_sample_rate, new_bits_per_sample);
+        if (actual_rate == 0) actual_rate = new_sample_rate;  // safety
+        audio_pipeline_update_format(actual_rate, new_bits_per_sample);
         audio_set_reconfiguring(false);
-        ESP_LOGI(TAG, "I2S reconfigured: %lu Hz, %d-bit", new_sample_rate, new_bits_per_sample);
+        ESP_LOGI(TAG, "I2S reconfigured: requested=%lu actual=%lu Hz, %d-bit",
+                 new_sample_rate, actual_rate, new_bits_per_sample);
     }
 
     // Step 5: Activate new source

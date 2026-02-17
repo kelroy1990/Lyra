@@ -1,7 +1,7 @@
 # TODO - Lyra Project
 
-> **Última actualización:** 2026-02-16
-> **Estado actual:** Audio Pipeline optimizado, DSP corregido ✅
+> **Última actualización:** 2026-02-17
+> **Estado actual:** Core de audio completo (USB + SD + DSP + I2S). Faltan capas de interacción.
 
 ---
 
@@ -12,20 +12,24 @@
 - **F0**: Estructura del proyecto
 - **F0.5**: USB Audio (UAC2 + CDC)
 - **F1**: I2S output (temporal con ES8311, objetivo ES9039Q2M)
-- **F1.5**: MSC (USB Mass Storage) — funcional, pendiente optimizar velocidad
+- **F1.5**: MSC (USB Mass Storage) — **READ ~15 MB/s, WRITE ~7.2 MB/s** (double-buffer ping-pong, DMA 64B align)
 - **F3**: DSP Pipeline con EQ
 - **F3.1**: **Audio Pipeline decoupled architecture** — space-check, zero overflow
 - **F3.2**: **Fix coeficientes biquad** — eliminado path pre-calculado con error 2x
+- **F6**: Reproducción microSD — WAV/FLAC/MP3, playlist, CUE parser, audio_source manager
+- **F6.1**: **I2S reconfig entre pistas SD** — same-source format change + fallback rate propagation
+- **F6.2**: **SD throughput** — setvbuf 32KB, decode block 1024 frames, SD CRC safety check
+- **F6.3**: **CUE sheet parser** — implementado (sin testear, falta .cue de prueba)
 
 ### 🔄 Próximas Fases
 
-- **F2**: Display & UI base (LVGL + MIPI DSI)
-- **F3.5**: **DSP Features avanzadas** ← **PRÓXIMO**
+- **F2**: Display & UI base (LVGL + MIPI DSI) ← **PRÓXIMO (hardware)**
+- **F3.5**: DSP Features avanzadas (EQ paramétrico 5 bandas, crossfeed, loudness)
 - **F4**: Gestión de energía (MAX77972, BMA400)
 - **F5**: Controles físicos (botones GPIO)
-- **F6**: Reproducción microSD (FLAC, WAV, MP3)
 - **F7**: Wireless ESP32-C5 (BT5 + WiFi6)
 - **F8**: UI avanzada
+- **HW**: Migración a ES9039Q2M (placa final)
 
 ---
 
@@ -260,10 +264,37 @@ Acceso via CDC (puerto COM/ttyUSB):
 - **Solución**: Eliminado path pre-calculado, siempre usar `biquad_calculate_coeffs()` dinámico
 - **Estado**: ✅ Todos los presets suenan correctamente
 
+### **RESUELTO ✅**: I2S no reconfigura entre pistas SD
+- **Problema**: Canciones suenan aceleradas al cambiar entre pistas con distinto sample rate (SD→SD)
+- **Causa**: `audio_source_switch()` tenía `if (old == new_source) return;` que saltaba la reconfiguración I2S
+- **Solución**: Comparar formato actual vs nuevo antes del early return, reconfigurar si difiere
+- **Estado**: ✅ Funciona correctamente
+
+### **RESUELTO ✅**: I2S fallback rate mismatch
+- **Problema**: Si `i2s_output_init(352800)` falla y cae a 48kHz internamente, el pipeline se configura a 352800Hz
+- **Causa**: `i2s_output_init` retornaba `void`, el caller no sabía la tasa real configurada
+- **Solución**: Cambiado a `uint32_t i2s_output_init()` que retorna la tasa real. Todos los callers usan `actual_rate`
+- **Estado**: ✅ Pipeline siempre sincronizado con I2S real
+
+### **RESUELTO ✅**: mono_buf overflow con decode block 1024
+- **Problema**: Overflow en codecs WAV/FLAC al decodificar mono con block size 1024 (buf era 480)
+- **Solución**: `mono_buf[480]` → `mono_buf[1024]` en codec_wav.c y codec_flac.c
+- **Estado**: ✅ Corregido
+
+### **CONOCIDO ⚠️**: ES8311 no soporta >96kHz bien
+- **Problema**: 192kHz FLAC suena raro en placa de desarrollo (ES8311)
+- **Causa**: MCLK = 192000×256 = 49.15MHz excede límite del ES8311 (~24-25MHz max)
+- **Estado**: Limitación de hardware dev board. ES9039Q2M (placa final) soporta hasta 50MHz MCLK
+- **Workaround**: Limitar a 96kHz en dev board, o ignorar (placa final no tendrá este problema)
+
 ### **PENDIENTE ⚠️**: Crossfeed no implementado
 - **Problema**: Preset Headphone no hace nada (solo flat)
 - **Solución**: Implementar crossfeed (TODO prioridad alta)
 - **Workaround**: Usar otros presets mientras tanto
+
+### **PENDIENTE ⚠️**: CUE sheet sin testear
+- **Problema**: Parser implementado pero sin archivo .cue de prueba
+- **Solución**: Conseguir un CD rip (single FLAC/WAV + .cue) y probar comandos `play album.cue`, `track`, `next`, `prev`
 
 ---
 
@@ -447,7 +478,7 @@ Ver `DSP_BUDGET_GUIDE.md` para más ejemplos.
 
 ## 🚀 Próximos Pasos Recomendados
 
-### **Próxima sesión:**
+### **Próxima sesión — DSP Features (F3.5):**
 
 1. **EQ Paramétrico 5 bandas** (feature principal de producto)
    - Añadir API de control: `dsp_chain_set_band(band_idx, freq, gain_db, Q)`
@@ -463,46 +494,75 @@ Ver `DSP_BUDGET_GUIDE.md` para más ejemplos.
    - Añadir a `dsp_chain_t`: `float balance_l`, `float balance_r`
    - Aplicar después de EQ, antes de limiter
 
-### **A medio plazo:**
+### **A medio plazo — Software:**
 
-1. **Loudness compensation** (Fletcher-Munson)
-2. **NVS Storage** para guardar presets de usuario
-3. **Preparar UI** (cuando F2 esté lista) - sliders EQ, selector presets, medidor CPU
+1. **CUE sheet testing** (cuando tengas un .cue de prueba)
+2. **Loudness compensation** (Fletcher-Munson)
+3. **NVS Storage** para guardar presets de usuario
 4. **Más presets** predefinidos (Pop, Metal, Electronic, Vocal, Acoustic)
 
-### **Hardware (cuando llegue ES9039Q2M):**
+### **Hardware — Placa final:**
 
-1. Migrar de ES8311 a ES9039Q2M
-2. Driver I2C para control del DAC
-3. Implementar selector de filtro digital del DAC (7 opciones)
-4. Testing con hardware final
-5. Ajustar MCLK para 384kHz (49.15 MHz con MCLK×128)
+1. Migrar de ES8311 a ES9039Q2M (driver SPI para registros)
+2. Implementar selector de filtro digital del DAC (7 opciones)
+3. Ajustar MCLK para 384kHz (49.15 MHz con MCLK×128)
+4. Display MIPI DSI + LVGL (F2)
+5. Botones GPIO (F5)
+6. MAX77972 power management (F4)
+7. SDMMC DDR50 experimental (si se necesita más throughput SD)
 
 ---
 
 ## 📊 Arquitectura Audio Pipeline (Actual)
 
 ```
-USB Host → TinyUSB FIFO (12.5KB) → audio_task (DSP) → StreamBuffer (16KB) → i2s_feeder_task → I2S DMA → DAC
-                ↑                        ↓ space-check                              ↓ notify
-                └── async feedback ←── FIFO level                              xTaskNotifyGive()
+USB Host ──→ TinyUSB FIFO (12.5KB) ──→ audio_task (DSP) ──┐
+                ↑                                          │
+                └── async feedback ←── FIFO level          │
+                                                           ↓
+SD Card ──→ sd_player_task (decode) ──→ audio_source ──→ StreamBuffer (16KB) ──→ i2s_feeder_task ──→ I2S DMA ──→ DAC
+        WAV/FLAC/MP3 codecs              manager              ↓ notify
+        setvbuf 32KB                   (USB/SD switch)    xTaskNotifyGive()
+        1024 frames/block              i2s_output_init()
+                                       (returns actual_rate)
 ```
 
 - **audio_task** (prio 5, core 1, 12KB stack): Lee FIFO solo si hay espacio en stream buffer, aplica DSP, escribe non-blocking
 - **i2s_feeder_task** (prio 4, core 1, 8KB stack): Lee stream buffer, escribe I2S con retry loop (timeout 100ms), notifica audio_task
-- **Resultado**: ovf=0, blk=0, FIFO 40-91%, loop=220us
+- **sd_player_task** (prio 3, core 0, 8KB stack): Decodifica SD audio, escribe al stream buffer, detecta cambios de formato
+- **audio_source manager**: Conmuta USB/SD, flush buffers, reconfig I2S con rate real (fallback-safe)
+- **Resultado USB**: ovf=0, blk=0, FIFO 40-91%, loop=220us
+- **Resultado SD**: WAV/FLAC/MP3 playback, auto-reconfig I2S entre pistas con distinto formato
 
 ## ✅ Checklist de Continuación
 
+### Core Audio (COMPLETADO)
 - [x] **DSP compilando sin warnings**
 - [x] **Presets funcionando correctamente** (coeficientes dinámicos)
 - [x] **Pipeline estable** (zero overflow, zero data loss)
-- [x] **Formato switching** (192kHz ↔ 48kHz sin problemas)
-- [ ] **EQ Paramétrico 5 bandas** ⏸️ (siguiente feature)
+- [x] **Formato switching USB** (192kHz ↔ 48kHz sin problemas)
+- [x] **SD Player** — WAV, FLAC, MP3, playlist, avance pistas
+- [x] **I2S reconfig entre pistas SD** (same-source + fallback rate)
+- [x] **MSC optimizado** (15 MB/s read, 7.2 MB/s write)
+- [x] **CUE parser** implementado (pendiente testing)
+- [x] **SD throughput** — setvbuf 32KB, decode block 1024
+
+### Pendiente Software
+- [ ] **CUE sheet testing** ⏸️ (falta archivo .cue de prueba)
+- [ ] **EQ Paramétrico 5 bandas** ⏸️ (siguiente feature DSP)
 - [ ] **Crossfeed implementado** ⏸️ (pendiente)
 - [ ] **Loudness compensation** ⏸️ (pendiente)
+- [ ] **Balance L/R** ⏸️ (trivial)
 - [ ] **NVS storage** ⏸️ (pendiente)
 - [ ] **Limpieza código legacy** ⏸️ (coeffs_48k muertos, diagnósticos)
+
+### Pendiente Hardware / Integración
+- [ ] **Display MIPI DSI + LVGL** (F2)
+- [ ] **ES9039Q2M DAC** (placa final — SPI control, I2S data)
+- [ ] **Botones GPIO** (F5)
+- [ ] **MAX77972 power management** (F4)
+- [ ] **ESP32-C5 wireless** (F7)
+- [ ] **SDMMC DDR50 experimental** (investigado, no implementado)
 
 ---
 

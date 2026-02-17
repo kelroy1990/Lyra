@@ -52,4 +52,5 @@ void audio_set_reconfiguring(bool val);
 bool audio_is_feeder_writing(void);
 
 // Reconfigure I2S output (exposed from app_main.c)
-void i2s_output_init(uint32_t sample_rate, uint8_t bits_per_sample);
+// Returns actual sample rate configured (may differ from requested if fallback occurred)
+uint32_t i2s_output_init(uint32_t sample_rate, uint8_t bits_per_sample);

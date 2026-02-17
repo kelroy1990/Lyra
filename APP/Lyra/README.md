@@ -169,7 +169,7 @@ Uso: streaming BT a auriculares, app companion, OTA.
 Host PC detecta:
   IAD #1 : UAC2 Speaker    (ITF 0 Audio Control, ITF 1 Audio Streaming)
   IAD #2 : CDC ACM Serial  (ITF 2 CDC Control,   ITF 3 CDC Data)
-  IAD #3 : MSC             (ITF 4 Mass Storage)   [planificado - F6]
+  IAD #3 : MSC             (ITF 4 Mass Storage)   ✅ Implementado
 ```
 
 ### 2.3 Asignacion de Endpoints
@@ -210,46 +210,47 @@ printf() -> stdout -> freopen("/dev/usbcdc") -> cdc_vfs_write() -> tud_cdc_write
 lyra/
 ├── CMakeLists.txt                          # Raiz del proyecto ESP-IDF
 ├── README.md                               # Este archivo
+├── TODO.md                                 # Tracking de tareas y estado
+├── DSP_BUDGET_GUIDE.md                     # Guia integracion UI con budget DSP
+├── SDMMC.md                                # Investigacion SDMMC DDR/UHS-I
 ├── main/
 │   ├── CMakeLists.txt                      # Build config del componente main
 │   ├── idf_component.yml                   # Dependencia: espressif/tinyusb
-│   ├── app_main.c                          # Entry point, init de subsistemas
+│   ├── app_main.c                          # Entry point, I2S, audio/feeder tasks, CDC
+│   ├── audio_source.c/.h                   # Audio source manager (USB/SD switch)
 │   ├── tusb_config.h                       # Configuracion TinyUSB
-│   ├── usb_descriptors.h                   # IDs de entidad, enum de interfaces
-│   ├── usb_descriptors.c                   # Callbacks de descriptores USB
-│   ├── usb_cdc_vfs.h                       # Header del driver VFS CDC
-│   └── usb_cdc_vfs.c                       # Driver VFS para printf -> USB CDC
+│   ├── usb_descriptors.c/.h                # Callbacks de descriptores USB
+│   ├── usb_msc.c                           # USB Mass Storage Class
+│   └── usb_mode.c/.h                       # USB mode switching (Audio/MSC)
 └── components/
-    ├── usb_device/                         # TinyUSB: UAC2 + CDC + MSC
-    │   ├── usb_device.c
-    │   └── include/usb_device.h
-    ├── audio_pipeline/                     # Source mgr, DSP, I2S output
-    │   ├── audio_pipeline.c
-    │   └── include/audio_pipeline.h
-    ├── audio_codecs/                       # Decoders: FLAC, MP3, WAV, AAC
-    │   ├── audio_codecs.c
-    │   └── include/audio_codecs.h
-    ├── display/                            # MIPI DSI driver + LVGL init
-    │   ├── display.c
-    │   └── include/display.h
-    ├── ui/                                 # Pantallas, menus, state machine
-    │   ├── ui.c
-    │   └── include/ui.h
-    ├── input/                              # GPIO buttons + power button
-    │   ├── input.c
-    │   └── include/input.h
-    ├── storage/                            # microSD (SDIO) + filesystem
-    │   ├── storage.c
+    ├── audio_pipeline/                     # DSP chain, biquad, presets
+    │   ├── audio_pipeline.c                # Integration layer
+    │   ├── dsp_biquad.c/.h                 # Biquad IIR filters (FPU optimized)
+    │   ├── dsp_chain.c/.h                  # DSP chain manager + budget API
+    │   ├── dsp_presets.c/.h                # 7 presets + dynamic coefficients
+    │   └── include/dsp_types.h             # Tipos comunes DSP
+    ├── audio_codecs/                       # Decoders: WAV, FLAC, MP3
+    │   ├── audio_codecs.c                  # Codec dispatcher (setvbuf 32KB)
+    │   ├── codec_wav.c                     # WAV decoder (dr_wav, mono support)
+    │   ├── codec_flac.c                    # FLAC decoder (dr_flac, mono support)
+    │   ├── codec_mp3.c                     # MP3 decoder (dr_mp3)
+    │   └── include/audio_codecs.h          # Public API
+    ├── sd_player/                          # SD card audio playback
+    │   ├── sd_player.c                     # Player engine, state machine, CDC cmds
+    │   ├── sd_playlist.c                   # Playlist scan, audio extensions, CUE dedup
+    │   ├── cue_parser.c/.h                 # CUE sheet parser (single-FILE)
+    │   └── include/sd_player.h             # Public API
+    ├── storage/                            # microSD (SDMMC) + filesystem
+    │   ├── sd_card.c                       # SDMMC driver, UHS-I safety check
     │   └── include/storage.h
-    ├── power/                              # MAX77972 I2C, bateria, carga
-    │   ├── power.c
-    │   └── include/power.h
-    ├── sensors/                            # BMA400 acelerometro
-    │   ├── sensors.c
-    │   └── include/sensors.h
-    └── wireless/                           # SDIO <-> ESP32-C5, BT/WiFi
-        ├── wireless.c
-        └── include/wireless.h
+    ├── tinyusb/                            # TinyUSB 0.20.0 local build
+    │   └── CMakeLists.txt                  # DWC2 slave, rhport1 HS
+    ├── display/                            # MIPI DSI driver + LVGL (stub)
+    ├── ui/                                 # Pantallas, menus (stub)
+    ├── input/                              # GPIO buttons (stub)
+    ├── power/                              # MAX77972 + bateria (stub)
+    ├── sensors/                            # BMA400 acelerometro (stub)
+    └── wireless/                           # ESP32-C5 via SDIO (stub)
 ```
 
 ### 3.1 Integracion TinyUSB (sin esp_tinyusb)
@@ -342,20 +343,20 @@ A 384 kHz/32-bit/stereo: `(384000/8000 + 1) * 4 * 2 = 392 bytes` por microframe 
 ## 5. Pipeline de Audio
 
 ```
-USB UAC2 FIFO  ──┐
-                  ├──> Source Manager ──> Ring Buffer (PSRAM)
-microSD Decoder ──┘         |
-                            v
-                    EQ / DSP Processing
-                            |
-                            v
-                     I2S DMA Buffer
-                            |
-                            v
-                    ES9039Q2M DAC (I2S)
-                            |
-                            v
-                   4.4mm Balanced Output
+USB Host ──→ TinyUSB FIFO (12.5KB) ──→ audio_task (DSP) ──┐
+                ↑                                          │
+                └── async feedback ←── FIFO level          │
+                                                           ↓
+SD Card ──→ sd_player_task (decode) ──→ audio_source ──→ StreamBuffer (16KB)
+        WAV/FLAC/MP3 codecs              manager              │
+        setvbuf 32KB                   (USB/SD switch)        ↓
+        1024 frames/block              i2s_output_init   i2s_feeder_task
+                                       (actual_rate)          │
+                                                              ↓
+                                                        I2S DMA → DAC
+                                                              │
+                                                              ↓
+                                                    4.4mm Balanced Output
 ```
 
 ### 5.1 Control del DAC
@@ -383,9 +384,12 @@ microSD Decoder ──┘         |
 | Tarea             | Prioridad | Core | Funcion                           |
 |-------------------|-----------|------|-----------------------------------|
 | tusb_device_task  | 5         | 1    | Manejo de eventos USB TinyUSB     |
-| audio_task        | 4         | 1    | Pipeline de audio (FIFO -> I2S)   |
-| ui_task           | 3         | 0    | LVGL display + touch              |
-| system_task       | 2         | 0    | Energia, botones, sensores        |
+| audio_task        | 5         | 1    | USB FIFO → DSP → StreamBuffer     |
+| i2s_feeder_task   | 4         | 1    | StreamBuffer → I2S DMA → DAC      |
+| sd_player_task    | 3         | 0    | SD decode → StreamBuffer          |
+| msc_io_task       | 3         | 1    | MSC double-buffer ping-pong       |
+| ui_task           | 3         | 0    | LVGL display + touch (futuro)     |
+| system_task       | 2         | 0    | Energia, botones, sensores (futuro)|
 
 **Asignacion por core:**
 - **Core 0:** UI + sistema (no tiempo real)
@@ -539,12 +543,14 @@ De lo contrario, mantener polling actual.
 |------|---------------------------|--------------------------|--------------|
 | F0   | Estructura del proyecto   | Todos (placeholder)      | ✅ Completado |
 | F0.5 | USB Audio (UAC2+CDC)      | usb_device, TinyUSB      | ✅ Completado |
-| F1   | I2S output a ES9039Q2M    | audio_pipeline           | 🟡 Temporal (ES8311) |
+| F1   | I2S output a DAC          | audio_pipeline           | 🟡 Temporal (ES8311) |
+| F1.5 | USB Mass Storage (MSC)    | usb_msc                  | ✅ Completado (15/7.2 MB/s R/W) |
 | F2   | Display & UI base         | display, ui              | ⏸️ Pendiente  |
 | F3   | EQ / DSP Pipeline         | audio_pipeline/dsp       | ✅ Completado |
+| F3.5 | DSP Features avanzadas    | audio_pipeline           | ⏸️ Pendiente (EQ 5 bandas, crossfeed) |
 | F4   | Gestion de energia        | power, sensors           | ⏸️ Pendiente  |
 | F5   | Controles fisicos         | input                    | ⏸️ Pendiente  |
-| F6   | Reproduccion microSD      | storage, audio_codecs    | ⏸️ Pendiente  |
+| F6   | Reproduccion microSD      | sd_player, audio_codecs  | ✅ Completado (WAV/FLAC/MP3/CUE) |
 | F7   | Wireless ESP32-C5         | wireless                 | ⏸️ Pendiente  |
 | F8   | UI avanzada               | ui                       | ⏸️ Pendiente  |
 | F9   | Polish y features avanzados| Todos                   | ⏸️ Pendiente  |
@@ -817,6 +823,34 @@ components/audio_pipeline/
 - Integrar con UI (F2) para control visual
 - NVS storage para presets personalizados del usuario
 
+### F1.5 - USB Mass Storage (MSC) ✅
+**Estado:** COMPLETADO — READ ~15 MB/s, WRITE ~7.2 MB/s
+
+- ✅ MSC expone tarjeta SD como unidad USB (FAT/exFAT)
+- ✅ Double-buffer ping-pong (2×32KB) para throughput
+- ✅ DMA bounce buffer alineado a 64 bytes
+- ✅ IO task en CPU1 con write-behind + read prefetch
+- ✅ Conmutación Audio ↔ MSC via CDC command
+
+### F6 - Reproduccion microSD ✅
+**Estado:** COMPLETADO — WAV, FLAC, MP3 con playlist y CUE
+
+- ✅ Codecs: WAV (dr_wav), FLAC (dr_flac), MP3 (dr_mp3)
+- ✅ Mono → stereo expansion en WAV y FLAC
+- ✅ setvbuf 32KB read-ahead para throughput SD
+- ✅ Decode block 1024 frames (antes 480)
+- ✅ Playlist manager: escaneo carpeta, extensiones audio
+- ✅ CUE sheet parser: single-FILE, gapless seek (implementado, sin testear)
+- ✅ Audio source manager: conmutación USB/SD con flush + I2S reconfig
+- ✅ I2S reconfig automático entre pistas con distinto formato
+- ✅ Fallback rate propagation: `i2s_output_init()` retorna tasa real
+- ✅ Comandos CDC: `play`, `stop`, `next`, `prev`, `track`, `playlist`, `seek`, `sd ls`, `sd info`
+
+**Formatos soportados:**
+- WAV: PCM 8/16/24/32-bit, float 32/64-bit, hasta 384kHz
+- FLAC: hasta 32-bit, hasta 384kHz
+- MP3: todos los bitrates
+
 ### F4 - Gestion de Energia
 - Driver I2C del MAX77972 (cargador + fuel gauge)
 - Monitorizacion de nivel de bateria y display en UI
@@ -830,12 +864,8 @@ components/audio_pipeline/
 - Deteccion pulsacion corta / larga
 - Integracion con pipeline de audio (volumen, transporte)
 
-### F6 - Reproduccion microSD
-- Driver SDIO para microSD
-- Filesystem FAT/exFAT
-- Decoders de audio: FLAC, WAV, MP3 (minimo)
-- USB MSC para transferencia de archivos
-- Gestion de playlists / biblioteca
+### F6 - Reproduccion microSD ✅
+Ver seccion F6 arriba. Completado.
 
 ### F7 - Wireless ESP32-C5
 - Comunicacion SDIO con C5
