@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
+#include "esp_random.h"
 #if SOC_SDMMC_IO_POWER_EXTERNAL
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #endif
@@ -58,7 +59,7 @@ static const char SD_DRV[] = "0:";
 
 static sdmmc_card_t *s_card = NULL;
 static sdmmc_host_t s_host = SDMMC_HOST_DEFAULT();
-static sdmmc_slot_config_t s_slot_config;           // kept for DDR50 fallback re-init
+static sdmmc_slot_config_t s_slot_config;           // kept for UHS-I fallback re-init
 static FATFS *s_fatfs = NULL;
 static SemaphoreHandle_t s_mutex = NULL;
 static volatile storage_mode_t s_mode = STORAGE_MODE_NONE;
@@ -100,11 +101,27 @@ static void sd_power_cycle(void)
         ESP_ERROR_CHECK(gpio_config(&pwr_cfg));
         s_pwr_gpio_initialized = true;
     }
-    ESP_LOGI(TAG, "SD power cycle (GPIO %d): OFF...", SD_PWR_GPIO);
-    ESP_ERROR_CHECK(gpio_set_level(SD_PWR_GPIO, 1));  // OFF (P-MOSFET, active low)
-    vTaskDelay(pdMS_TO_TICKS(100));
-    ESP_ERROR_CHECK(gpio_set_level(SD_PWR_GPIO, 0));  // ON
-    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // 1) Cut VDDIO first — prevents parasitic supply through I/O ESD diodes
+    //    that would keep the card alive while VDD is off.
+    if (s_host.pwr_ctrl_handle) {
+        sd_pwr_ctrl_set_io_voltage(s_host.pwr_ctrl_handle, 0);
+    }
+
+    // 2) Cut VDD
+    ESP_LOGI(TAG, "SD power cycle (GPIO %d): OFF (VDD+VDDIO)...", SD_PWR_GPIO);
+    ESP_ERROR_CHECK(gpio_set_level(SD_PWR_GPIO, 1));  // HIGH = P-MOSFET OFF
+    vTaskDelay(pdMS_TO_TICKS(300));                    // SD spec: VCC < 0.5V
+
+    // 3) Restore VDDIO to 3.3V before VDD so card sees stable I/O levels on boot
+    if (s_host.pwr_ctrl_handle) {
+        sd_pwr_ctrl_set_io_voltage(s_host.pwr_ctrl_handle, 3300);
+        vTaskDelay(pdMS_TO_TICKS(10));                 // LDO settle time
+    }
+
+    // 4) Restore VDD
+    ESP_ERROR_CHECK(gpio_set_level(SD_PWR_GPIO, 0));   // LOW = P-MOSFET ON
+    vTaskDelay(pdMS_TO_TICKS(50));                      // Card power-up (1ms min per spec)
     ESP_LOGI(TAG, "SD power cycle complete — card reset to 3.3V");
 #else
     // LYRA_FINAL_BOARD: TODO — add power control via dedicated regulator
@@ -174,53 +191,77 @@ static esp_err_t fat_unmount(void)
 }
 
 //--------------------------------------------------------------------+
-// Internal: card init with DDR50 → SDR fallback (Phase 2)
+// Internal: card init with SDR50 → retry → HS fallback
 //--------------------------------------------------------------------+
+
+static void restore_sdr50_config(void)
+{
+    s_host.max_freq_khz = SDMMC_FREQ_SDR50;
+    s_host.flags &= ~SDMMC_HOST_FLAG_DDR;
+    s_slot_config.flags |= SDMMC_SLOT_FLAG_UHS1;
+}
 
 static esp_err_t try_card_init(void)
 {
     ESP_LOGI(TAG, "Probing SD card (sdmmc_card_init)...");
     esp_err_t ret = sdmmc_card_init(&s_host, s_card);
 
-#if LYRA_SD_SPEED >= 2
-    // Post-init safety check: if we requested UHS-I (1.8V) but the card
-    // didn't accept the voltage switch (S18A=NO), the host is now running
-    // at 100 MHz with 3.3V signaling → CRC errors on every data transfer.
-    // Force the fallback to safe HS speed.
+    // Card init OK but UHS-I not negotiated (S18A missing) — the card is
+    // now running at 100 MHz 3.3V which is out-of-spec.  Retry once after
+    // a full power cycle (LDO already at 3.3V from storage_init).
     if (ret == ESP_OK && !s_card->is_uhs1) {
-        ESP_LOGW(TAG, "Card rejected 1.8V switch (S18A=%s, UHS=%d) — %d kHz at 3.3V is UNSAFE",
-                 (s_card->ocr & SD_OCR_S18_RA) ? "yes" : "NO",
-                 s_card->is_uhs1,
-                 s_card->real_freq_khz);
-        ret = ESP_ERR_NOT_SUPPORTED;  // trigger fallback below
-    }
-#endif
+        ESP_LOGW(TAG, "Card OK but UHS-I NOT negotiated (OCR=0x%08lx, freq=%d) "
+                 "— 100 MHz at 3.3V is out-of-spec, retrying...",
+                 (unsigned long)s_card->ocr, s_card->real_freq_khz);
 
-#if LYRA_SD_SPEED >= 1
+        sd_power_cycle();
+        restore_sdr50_config();
+        sdmmc_host_init_slot(s_host.slot, &s_slot_config);
+        ret = sdmmc_card_init(&s_host, s_card);
+
+        if (ret == ESP_OK && s_card->is_uhs1) {
+            ESP_LOGI(TAG, "Retry succeeded: SDR50 UHS-I negotiated");
+        } else if (ret == ESP_OK) {
+            ESP_LOGW(TAG, "Retry OK but still no UHS-I — falling back to HS");
+            // Card doesn't support 1.8V switch; cap at safe 3.3V High Speed
+            sd_power_cycle();
+            s_host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+            s_slot_config.flags &= ~SDMMC_SLOT_FLAG_UHS1;
+            sdmmc_host_init_slot(s_host.slot, &s_slot_config);
+            ret = sdmmc_card_init(&s_host, s_card);
+        }
+    }
+
+    // Card init failed entirely — fall back to HS 40 MHz (3.3V, no UHS-I)
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Init at speed level %d failed (%s) — falling back to SDR 40 MHz...",
-                 LYRA_SD_SPEED, esp_err_to_name(ret));
-#if LYRA_SD_SPEED >= 2
-        // CMD11 may have already switched card to 1.8V before the failure.
-        // Power cycle is the ONLY way to return card to 3.3V (SD spec 4.2.4).
+        ESP_LOGW(TAG, "Card init failed (%s) — falling back to HS 40 MHz...",
+                 esp_err_to_name(ret));
+
         sd_power_cycle();
 
-        // Remove UHS-I flag so driver won't send CMD11 again
-        s_slot_config.flags &= ~SDMMC_SLOT_FLAG_UHS1;
-        sdmmc_host_init_slot(s_host.slot, &s_slot_config);
-#endif
         s_host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
         s_host.flags &= ~SDMMC_HOST_FLAG_DDR;
+        s_slot_config.flags &= ~SDMMC_SLOT_FLAG_UHS1;
+        sdmmc_host_init_slot(s_host.slot, &s_slot_config);
 
         ret = sdmmc_card_init(&s_host, s_card);
         if (ret == ESP_OK) {
-            ESP_LOGW(TAG, "Fallback OK: %d kHz SDR (DDR=%d)",
-                     s_card->real_freq_khz, s_card->is_ddr);
+            ESP_LOGW(TAG, "Fallback OK: %d kHz", s_card->real_freq_khz);
         } else {
-            ESP_LOGE(TAG, "Fallback to SDR 40 MHz also failed: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "Fallback to HS also failed: %s", esp_err_to_name(ret));
         }
     }
-#endif
+
+    // Final guard: never allow >50 MHz without UHS-I (SD spec: HS max = 50 MHz @ 3.3V)
+    if (ret == ESP_OK && !s_card->is_uhs1 && s_card->real_freq_khz > SDMMC_FREQ_HIGHSPEED) {
+        ESP_LOGE(TAG, "BUG: card at %d kHz without UHS-I — capping to HS",
+                 s_card->real_freq_khz);
+        sd_power_cycle();
+        s_host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+        s_slot_config.flags &= ~SDMMC_SLOT_FLAG_UHS1;
+        sdmmc_host_init_slot(s_host.slot, &s_slot_config);
+        ret = sdmmc_card_init(&s_host, s_card);
+    }
 
     if (ret == ESP_OK) {
         s_card_healthy = true;
@@ -244,30 +285,22 @@ static esp_err_t try_card_init(void)
                  (unsigned long)throughput_kbs, throughput_kbs / 1024.0,
                  s_card->is_ddr ? " [DDR: x2 data rate]" : "");
 
-        // Log what actually got negotiated vs what we requested
-        ESP_LOGI(TAG, "  Requested  : Level %d", LYRA_SD_SPEED);
-        if (s_card->is_uhs1)
-            ESP_LOGI(TAG, "  Signaling  : 1.8V (UHS-I)");
-        else
-            ESP_LOGI(TAG, "  Signaling  : 3.3V");
-
-        if (s_card->is_ddr)
-            ESP_LOGW(TAG, "  ** DDR active — test reference only, expect errors on GPIO Matrix **");
-
+        const char *mode_str = "Default Speed";
+        if (s_card->is_uhs1) {
+            if (s_card->is_ddr)                              mode_str = "DDR50";
+            else if (s_card->real_freq_khz >= 170000)        mode_str = "SDR104";
+            else if (s_card->real_freq_khz >= 80000)         mode_str = "SDR50";
+            else                                             mode_str = "UHS-I HS";
+        } else if (s_card->real_freq_khz >= 40000)           mode_str = "High Speed";
+        ESP_LOGI(TAG, "  Speed mode : %s", mode_str);
+        ESP_LOGI(TAG, "  Signaling  : %s", s_card->is_uhs1 ? "1.8V (UHS-I)" : "3.3V");
         ESP_LOGI(TAG, "  Card OCR   : 0x%08lx (S18A=%s, SDHC=%s)",
                  (unsigned long)s_card->ocr,
                  (s_card->ocr & SD_OCR_S18_RA) ? "yes" : "NO",
                  (s_card->ocr & SD_OCR_SDHC_CAP) ? "yes" : "NO");
-        ESP_LOGI(TAG, "  Healthy    : YES");
         ESP_LOGI(TAG, "-----------------------------");
     } else {
         ESP_LOGW(TAG, "No SD card detected (or init failed): %s", esp_err_to_name(ret));
-#if LYRA_SD_SPEED >= 2
-        if (ret == ESP_ERR_TIMEOUT) {
-            ESP_LOGW(TAG, "  >> CMD11 voltage switch may have timed out.");
-            ESP_LOGW(TAG, "  >> Try LYRA_SD_SPEED=0 or 1 (3.3V modes).");
-        }
-#endif
     }
 
     return ret;
@@ -434,74 +467,13 @@ esp_err_t storage_init(void)
 {
     if (s_host_initialized) return ESP_OK;
 
-    // Power cycle on boot to recover from warm-reset 1.8V→3.3V mismatch
-    // (SD spec 4.2.4: power cycle is the ONLY way back from 1.8V)
-    sd_power_cycle();
-
     s_mutex = xSemaphoreCreateMutex();
     if (!s_mutex) return ESP_ERR_NO_MEM;
 
-    // Configure SDMMC host speed — set by LYRA_SD_SPEED in CMakeLists.txt
-    //
-    // GPIO Matrix (Slot 1) timing analysis:
-    //   SDR: data_period = 1/freq        (sample on rising edge only)
-    //   DDR: data_period = 1/(2×freq)    (sample on BOTH edges)
-    //   GPIO Matrix skew between CLK/DATA lines: ~5-10 ns
-    //   → SDR works up to ~50-66 MHz; DDR fails at any practical freq
-    //
-    // PLL160: div=4→40MHz, div=3→53.3MHz, div=2→80MHz
-    // PLL200: div=4→50MHz, div=3→66.7MHz, div=2→100MHz (SDR50)
-    //
-    // Driver auto-selects PLL200 when freq > 40MHz.
-    // UHS-I modes (SDR50/DDR50) require CMD11 voltage switch to 1.8V.
-
-#ifndef LYRA_SD_SPEED
-#define LYRA_SD_SPEED 0
-#endif
-
-#if LYRA_SD_SPEED == 0
-    // Level 0: SDR 40 MHz — safe baseline (PLL160/4, 3.3V)
-    s_host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;  // 40000
-    s_host.flags &= ~SDMMC_HOST_FLAG_DDR;
-    ESP_LOGI(TAG, "SD Speed Level 0: SDR 40 MHz (HS, 3.3V) — data period 25.0 ns");
-
-#elif LYRA_SD_SPEED == 1
-    // Level 1: SDR 50 MHz — push HS limit (PLL200/4, 3.3V)
-    // Card stays in HS mode (no CMD11), host just clocks faster
-    // Driver uses PLL200 because freq > 40000
-    s_host.max_freq_khz = 50000;
-    s_host.flags &= ~SDMMC_HOST_FLAG_DDR;
-    ESP_LOGI(TAG, "SD Speed Level 1: SDR 50 MHz (HS+, 3.3V) — data period 20.0 ns");
-
-#elif LYRA_SD_SPEED == 2
-    // Level 2: SDR 50 MHz UHS-I — 1.8V signaling (cleaner edges, less noise)
-    // CMD11 voltage switch, but still SDR (no DDR flag)
-    s_host.max_freq_khz = 50000;
-    s_host.flags &= ~SDMMC_HOST_FLAG_DDR;
-    ESP_LOGI(TAG, "SD Speed Level 2: SDR 50 MHz (UHS-I 1.8V, no DDR) — data period 20.0 ns");
-
-#elif LYRA_SD_SPEED == 3
-    // Level 3: SDR50 100 MHz UHS-I — aggressive GPIO Matrix test
-    // 10 ns data period — same as DDR 50MHz, likely fails on GPIO Matrix
-    s_host.max_freq_khz = SDMMC_FREQ_SDR50;  // 100000
-    s_host.flags &= ~SDMMC_HOST_FLAG_DDR;
-    ESP_LOGI(TAG, "SD Speed Level 3: SDR50 100 MHz (UHS-I 1.8V) — data period 10.0 ns [AGGRESSIVE]");
-
-#elif LYRA_SD_SPEED == 4
-    // Level 4: DDR50 40 MHz — known broken on GPIO Matrix (reference)
-    s_host.max_freq_khz = 40000;
-    // DDR flag already set by SDMMC_HOST_DEFAULT()
-    ESP_LOGI(TAG, "SD Speed Level 4: DDR 40 MHz (UHS-I 1.8V) — data period 12.5 ns [KNOWN BROKEN]");
-
-#else
-#error "LYRA_SD_SPEED must be 0-4"
-#endif
-
-    ESP_LOGI(TAG, "Host flags: 0x%08lx (DDR=%s)",
-             (unsigned long)s_host.flags,
-             (s_host.flags & SDMMC_HOST_FLAG_DDR) ? "YES" : "NO");
-
-    // ESP32-P4: SDMMC I/O pins need on-chip LDO for their power domain
+    // ESP32-P4: SDMMC I/O pins need on-chip LDO for their power domain.
+    // Acquire the LDO handle BEFORE power-cycling so that sd_power_cycle()
+    // can cut VDDIO to 0V (preventing parasitic supply via I/O ESD diodes)
+    // and then restore it to 3.3V before VDD comes back.
 #if SOC_SDMMC_IO_POWER_EXTERNAL
     sd_pwr_ctrl_ldo_config_t ldo_config = {
         .ldo_chan_id = 4,  // LDO_VO4 for SDMMC I/O on P4
@@ -513,10 +485,24 @@ esp_err_t storage_init(void)
         return ret;
     }
     s_host.pwr_ctrl_handle = pwr_ctrl_handle;
-    ESP_LOGI(TAG, "SDMMC I/O LDO (chan 4) enabled");
+    ESP_LOGI(TAG, "SDMMC I/O LDO (chan 4) acquired");
 #else
     esp_err_t ret;
 #endif
+
+    // Full power cycle: VDDIO→0V, VDD off, wait, VDDIO→3.3V, VDD on.
+    // Ensures card fully resets even after warm-reset from 1.8V UHS-I session.
+    sd_power_cycle();
+
+    // Slot 0 = IOMUX direct routing (no GPIO matrix), required for UHS-I.
+    // SDR50: 100 MHz single-edge, 1.8V signaling → ~50 MB/s theoretical.
+    // CMD19 tuning is auto-performed by the driver for SDR50.
+    s_host.slot = SDMMC_HOST_SLOT_0;
+    s_host.max_freq_khz = SDMMC_FREQ_SDR50;
+    s_host.flags &= ~SDMMC_HOST_FLAG_DDR;
+
+    ESP_LOGI(TAG, "SDMMC: Slot 0 (IOMUX), target SDR50 (%d kHz)",
+             s_host.max_freq_khz);
 
     ret = sdmmc_host_init();
     if (ret != ESP_OK) {
@@ -525,7 +511,7 @@ esp_err_t storage_init(void)
     }
 
     // Configure slot GPIOs for 4-bit mode (stored in s_slot_config for
-    // DDR50 fallback re-init via sdmmc_host_init_slot)
+    // UHS-I fallback re-init via sdmmc_host_init_slot)
     s_slot_config = (sdmmc_slot_config_t)SDMMC_SLOT_CONFIG_DEFAULT();
     s_slot_config.clk = SD_CLK_GPIO;
     s_slot_config.cmd = SD_CMD_GPIO;
@@ -541,14 +527,7 @@ esp_err_t storage_init(void)
 #endif
     s_slot_config.wp = SDMMC_SLOT_NO_WP;
     s_slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-#if LYRA_SD_SPEED >= 2
-    // Levels 2-4 use 1.8V signaling (CMD11 voltage switch)
     s_slot_config.flags |= SDMMC_SLOT_FLAG_UHS1;
-    ESP_LOGI(TAG, "Slot %d: UHS-I flag SET — CMD11 voltage switch to 1.8V",
-             s_host.slot);
-#else
-    ESP_LOGI(TAG, "Slot %d: 3.3V signaling (no UHS-I)", s_host.slot);
-#endif
 
     ret = sdmmc_host_init_slot(s_host.slot, &s_slot_config);
     if (ret != ESP_OK) {
@@ -777,6 +756,16 @@ esp_err_t storage_get_info(uint64_t *total_bytes, uint64_t *free_bytes)
 //--------------------------------------------------------------------+
 // Format (runs on CPU1 to avoid WDT issues on large cards)
 //--------------------------------------------------------------------+
+//
+// Partition strategy:
+//   - Manual MBR at LBA 0 with partition starting at LBA 2048 (1 MB aligned)
+//     instead of FatFs f_fdisk which uses LBA 63 (old CHS alignment).
+//     LBA 2048 is the modern standard (Windows, Linux, macOS, SD spec).
+//   - Auto-selects FAT32 (<=32 GB) or exFAT (>32 GB) based on card size.
+//   - Progress tracking via counting diskio wrapper.
+//
+
+#define FMT_PART_START  2048   // Partition starts at LBA 2048 (1 MB aligned)
 
 typedef struct {
     uint32_t alloc_unit_size;
@@ -784,7 +773,153 @@ typedef struct {
     volatile esp_err_t result;
 } format_params_t;
 
-// Internal format logic — runs on CPU1 task
+// Format progress tracking (written by format_task on CPU1, read from CPU0)
+static volatile uint8_t  s_fmt_progress;        // 0-100%
+static volatile uint32_t s_fmt_sectors_written;
+static volatile uint32_t s_fmt_total_estimate;
+
+//--------------------------------------------------------------------+
+// Counting diskio — wraps SDMMC with write progress tracking
+//--------------------------------------------------------------------+
+
+static DSTATUS fmt_diskio_init(BYTE pdrv)   { (void)pdrv; return 0; }
+static DSTATUS fmt_diskio_status(BYTE pdrv) { (void)pdrv; return 0; }
+
+static DRESULT fmt_diskio_read(BYTE pdrv, BYTE *buff, uint32_t sector, unsigned count)
+{
+    (void)pdrv;
+    esp_err_t err = sdmmc_read_sectors(s_card, buff, sector, count);
+    return (err == ESP_OK) ? RES_OK : RES_ERROR;
+}
+
+static DRESULT fmt_diskio_write(BYTE pdrv, const BYTE *buff, uint32_t sector, unsigned count)
+{
+    (void)pdrv;
+    esp_err_t err = sdmmc_write_sectors(s_card, buff, sector, count);
+    if (err != ESP_OK) return RES_ERROR;
+
+    s_fmt_sectors_written += count;
+    if (s_fmt_total_estimate > 0) {
+        uint32_t pct = s_fmt_sectors_written * 90 / s_fmt_total_estimate;
+        if (pct > 90) pct = 90;
+        s_fmt_progress = 5 + (uint8_t)pct;  // 5% (MBR) + 0-90% (mkfs)
+    }
+    return RES_OK;
+}
+
+static DRESULT fmt_diskio_ioctl(BYTE pdrv, BYTE cmd, void *buff)
+{
+    (void)pdrv;
+    switch (cmd) {
+        case CTRL_SYNC:
+            return RES_OK;
+        case GET_SECTOR_COUNT:
+            *((DWORD *)buff) = s_card->csd.capacity;
+            return RES_OK;
+        case GET_SECTOR_SIZE:
+            *((WORD *)buff) = s_card->csd.sector_size;
+            return RES_OK;
+        default:
+            return RES_ERROR;
+    }
+}
+
+static const ff_diskio_impl_t s_fmt_diskio = {
+    .init   = fmt_diskio_init,
+    .status = fmt_diskio_status,
+    .read   = fmt_diskio_read,
+    .write  = fmt_diskio_write,
+    .ioctl  = fmt_diskio_ioctl,
+};
+
+//--------------------------------------------------------------------+
+// Manual MBR write — partition at LBA 2048
+//--------------------------------------------------------------------+
+// MBR with single partition entry, 1 MB aligned.
+// Partition type: 0x0C (FAT32 LBA) or 0x07 (exFAT/HPFS/NTFS).
+// CHS values: start=H32/S33/C0 (LBA 2048 with 255H/63S geometry),
+//             end=0xFE/0xFF/0xFF (overflow for large disks).
+
+static esp_err_t write_mbr(uint8_t part_type, uint32_t total_sectors, void *buf)
+{
+    uint8_t *mbr = (uint8_t *)buf;
+
+    // Zero the full work buffer (4096 bytes = 8 sectors).
+    // We write sectors 0-7 to ensure any stale GPT header at sector 1
+    // and protective MBR remnants are cleared.
+    memset(mbr, 0, 4096);
+
+    // Partition entry 1 at offset 0x1BE (16 bytes)
+    uint8_t *pe = &mbr[0x1BE];
+    pe[0]  = 0x00;          // Not bootable
+    pe[1]  = 0x20;          // CHS start: head=32
+    pe[2]  = 0x21;          // CHS start: sector=33, cylinder[9:8]=0
+    pe[3]  = 0x00;          // CHS start: cylinder[7:0]=0
+    pe[4]  = part_type;     // 0x0C=FAT32 LBA, 0x07=exFAT
+    pe[5]  = 0xFE;          // CHS end: overflow
+    pe[6]  = 0xFF;
+    pe[7]  = 0xFF;
+
+    // LBA start (little-endian)
+    uint32_t lba_start = FMT_PART_START;
+    pe[8]  = (lba_start >>  0) & 0xFF;
+    pe[9]  = (lba_start >>  8) & 0xFF;
+    pe[10] = (lba_start >> 16) & 0xFF;
+    pe[11] = (lba_start >> 24) & 0xFF;
+
+    // LBA size (little-endian)
+    uint32_t lba_size = total_sectors - lba_start;
+    pe[12] = (lba_size >>  0) & 0xFF;
+    pe[13] = (lba_size >>  8) & 0xFF;
+    pe[14] = (lba_size >> 16) & 0xFF;
+    pe[15] = (lba_size >> 24) & 0xFF;
+
+    // Disk signature (4 bytes at 0x1B8) — Windows writes one if missing,
+    // better to set it ourselves so the MBR isn't modified on first plug-in
+    uint32_t disk_sig = esp_random();
+    if (disk_sig == 0) disk_sig = 1;  // Avoid all-zeros (looks uninitialized)
+    mbr[0x1B8] = (disk_sig >>  0) & 0xFF;
+    mbr[0x1B9] = (disk_sig >>  8) & 0xFF;
+    mbr[0x1BA] = (disk_sig >> 16) & 0xFF;
+    mbr[0x1BB] = (disk_sig >> 24) & 0xFF;
+    mbr[0x1BC] = 0x00;  // Reserved (2 bytes, must be 0)
+    mbr[0x1BD] = 0x00;
+
+    // Boot signature
+    mbr[0x1FE] = 0x55;
+    mbr[0x1FF] = 0xAA;
+
+    // Write sectors 0-7: MBR + 7 zero sectors (clears GPT header at sector 1)
+    esp_err_t err = sdmmc_write_sectors(s_card, mbr, 0, 8);
+    if (err != ESP_OK) return err;
+
+    // Verify MBR by reading it back and checking signature + partition entry
+    memset(mbr, 0, 512);
+    err = sdmmc_read_sectors(s_card, mbr, 0, 1);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "MBR verify: read-back failed");
+        return err;
+    }
+    if (mbr[0x1FE] != 0x55 || mbr[0x1FF] != 0xAA) {
+        ESP_LOGE(TAG, "MBR verify: bad signature (0x%02X%02X)", mbr[0x1FF], mbr[0x1FE]);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    uint32_t readback_lba = (uint32_t)mbr[0x1C6] | ((uint32_t)mbr[0x1C7] << 8) |
+                            ((uint32_t)mbr[0x1C8] << 16) | ((uint32_t)mbr[0x1C9] << 24);
+    if (readback_lba != FMT_PART_START) {
+        ESP_LOGE(TAG, "MBR verify: LBA start mismatch (%lu != %d)", readback_lba, FMT_PART_START);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    ESP_LOGI(TAG, "MBR verified: partition at LBA %lu, size %lu sectors, type 0x%02X",
+             readback_lba, lba_size, part_type);
+
+    return ESP_OK;
+}
+
+//--------------------------------------------------------------------+
+// format_task — runs on CPU1
+//--------------------------------------------------------------------+
+
 static void format_task(void *arg)
 {
     format_params_t *p = (format_params_t *)arg;
@@ -809,6 +944,20 @@ static void format_task(void *arg)
         return;
     }
 
+    // ---- Sanity check: card must be large enough for partitioning ----
+    // Minimum: partition at LBA 2048 + at least 2048 sectors for filesystem
+    // (2048 sectors = 1 MB, smallest practical FAT volume)
+    uint32_t total_sectors = s_card->csd.capacity;
+    if (total_sectors <= FMT_PART_START + 2048) {
+        ESP_LOGE(TAG, "Card too small for formatting: %lu sectors (need > %d)",
+                 total_sectors, FMT_PART_START + 2048);
+        xSemaphoreGive(s_mutex);
+        p->result = ESP_ERR_INVALID_SIZE;
+        p->done = true;
+        vTaskDelete(NULL);
+        return;
+    }
+
     // Unmount if mounted
     if (s_mounted) {
         fat_unmount();
@@ -816,12 +965,8 @@ static void format_task(void *arg)
         s_mode = STORAGE_MODE_NONE;
     }
 
-    // Register diskio temporarily for format operation
-    ff_diskio_register_sdmmc(SD_PDRV, s_card);
-
     void *work_buf = malloc(4096);
     if (!work_buf) {
-        ff_diskio_register(SD_PDRV, NULL);
         xSemaphoreGive(s_mutex);
         p->result = ESP_ERR_NO_MEM;
         p->done = true;
@@ -829,77 +974,167 @@ static void format_task(void *arg)
         return;
     }
 
-    // Repartition: single partition using 100% of the card
+    // ---- Determine filesystem type based on card capacity ----
     // NOTE: No WDT workaround needed — this task runs on CPU1 which has
     // no IDLE WDT monitoring (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is off)
-    ESP_LOGI(TAG, "Creating single partition (100%% of card)...");
-    LBA_t plist[] = {100, 0, 0, 0};
-    FRESULT fres = f_fdisk(SD_PDRV, plist, work_buf);
-    if (fres != FR_OK) {
-        ESP_LOGE(TAG, "f_fdisk failed (FRESULT %d)", fres);
+    //
+    // csd.capacity is signed int in ESP-IDF. For cards up to 1TB (~1.95 billion
+    // sectors) it is positive and fits in uint32_t. For 2TB cards it would
+    // overflow — but those don't exist in SD form yet.
+    uint64_t total_bytes = (uint64_t)total_sectors * 512;
+    bool use_exfat = (total_bytes > 32ULL * 1024 * 1024 * 1024);  // >32 GB
+
+    uint8_t part_type = use_exfat ? 0x07 : 0x0C;
+    const char *fs_name = use_exfat ? "exFAT" : "FAT32";
+    BYTE fs_fmt = use_exfat ? FM_EXFAT : FM_FAT32;
+
+    ESP_LOGI(TAG, "Card: %lu sectors (%.1f GB) → %s",
+             total_sectors, total_bytes / (1024.0 * 1024.0 * 1024.0), fs_name);
+
+    // ---- Phase 1: Write MBR with partition at LBA 2048 (progress 0-5%) ----
+    s_fmt_progress = 2;
+    ESP_LOGI(TAG, "Writing MBR (partition LBA %d, type 0x%02X)...", FMT_PART_START, part_type);
+    esp_err_t err = write_mbr(part_type, total_sectors, work_buf);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "MBR write/verify failed: %s", esp_err_to_name(err));
         free(work_buf);
-        ff_diskio_register(SD_PDRV, NULL);
         xSemaphoreGive(s_mutex);
+        s_fmt_progress = 0;
         p->result = ESP_FAIL;
         p->done = true;
         vTaskDelete(NULL);
         return;
     }
+    s_fmt_progress = 5;
 
-    // Format the new partition as FAT32
-    ESP_LOGI(TAG, "Formatting as FAT32 (alloc_unit=%lu)...", p->alloc_unit_size);
+    // ---- Phase 2: Format filesystem (progress 5-95%) ----
+    ESP_LOGI(TAG, "Formatting as %s (alloc_unit=%lu)...", fs_name, p->alloc_unit_size);
+
+    // Estimate total sectors that f_mkfs will write (for progress tracking)
+    uint32_t vol_sectors = total_sectors - FMT_PART_START;
+    uint32_t au_sec = p->alloc_unit_size ? (p->alloc_unit_size / 512) : 0;
+    if (au_sec == 0) {
+        // Approximate f_mkfs auto cluster size
+        au_sec = use_exfat ? 256 : 64;  // 128KB exFAT, 32KB FAT32
+    }
+    uint32_t total_clusters = vol_sectors / au_sec;
+    if (use_exfat) {
+        // exFAT: allocation bitmap + VBR + upcase table
+        s_fmt_total_estimate = (total_clusters / (8 * 512)) + 300;
+    } else {
+        // FAT32: 2 FAT copies × (entries × 4 bytes / 512)
+        // Use uint64_t to prevent overflow for large cards
+        uint64_t fat_sectors = ((uint64_t)total_clusters * 4 + 511) / 512;
+        s_fmt_total_estimate = (uint32_t)(fat_sectors * 2 + 300);
+    }
+    if (s_fmt_total_estimate < 100) s_fmt_total_estimate = 100;
+    s_fmt_sectors_written = 0;
+
+    // Register counting diskio (replaces standard sdmmc diskio)
+    ff_diskio_register(SD_PDRV, &s_fmt_diskio);
+
+    // CRITICAL: Tell f_mkfs to use partition 1 from our MBR.
+    // Without this, f_mkfs with ipart=0 creates its OWN partition at LBA 63
+    // (N_SEC_TRACK=63 in FatFs) and overwrites our MBR via create_partition().
+    // With ipart=1, f_mkfs reads our MBR, extracts partition 1 boundaries
+    // (LBA 2048), formats within those bounds, and only updates the type byte.
+#if FF_MULTI_PARTITION
+    VolToPart[SD_PDRV].pt = 1;  // Use partition 1 from MBR (not auto-create)
+#endif
+
     const MKFS_PARM opt = {
-        .fmt = FM_FAT32,
+        .fmt   = fs_fmt,
         .au_size = p->alloc_unit_size,
+        .n_fat = use_exfat ? 0 : 2,  // FAT32: 2 FAT copies for redundancy
+                                       // exFAT: 0 → f_mkfs hardcodes 1 (per spec)
     };
-    fres = f_mkfs(SD_DRV, &opt, work_buf, 4096);
+    FRESULT fres = f_mkfs(SD_DRV, &opt, work_buf, 4096);
+
+    // Restore VolToPart to auto-detect for normal mount operations
+#if FF_MULTI_PARTITION
+    VolToPart[SD_PDRV].pt = 0;
+#endif
+
     free(work_buf);
-    ff_diskio_register(SD_PDRV, NULL);
+    ff_diskio_register(SD_PDRV, NULL);  // unregister counting diskio
 
     if (fres != FR_OK) {
-        ESP_LOGE(TAG, "Format failed (FRESULT %d)", fres);
+        ESP_LOGE(TAG, "f_mkfs failed (FRESULT %d) — MBR is valid, card recoverable "
+                 "with any PC disk utility", fres);
         xSemaphoreGive(s_mutex);
+        s_fmt_progress = 0;
         p->result = ESP_FAIL;
         p->done = true;
         vTaskDelete(NULL);
         return;
     }
 
-    ESP_LOGI(TAG, "Format complete, mounting...");
+    // ---- Phase 3: Mount (progress 95-100%) ----
+    s_fmt_progress = 96;
+    ESP_LOGI(TAG, "Format complete (%lu sectors written), mounting...",
+             s_fmt_sectors_written);
 
-    // Mount the freshly formatted card
     esp_err_t ret = fat_mount();
     if (ret == ESP_OK) {
         s_mounted = true;
         s_mode = STORAGE_MODE_LOCAL;
+        ESP_LOGI(TAG, "Formatted and mounted: %s, partition LBA %d-%lu",
+                 fs_name, FMT_PART_START, total_sectors - 1);
+    } else {
+        ESP_LOGW(TAG, "Format OK but mount failed (%s) — filesystem is valid on card",
+                 esp_err_to_name(ret));
     }
 
+    s_fmt_progress = 100;
     xSemaphoreGive(s_mutex);
     p->result = ret;
     p->done = true;
     vTaskDelete(NULL);
 }
 
-esp_err_t storage_format(uint32_t alloc_unit_size)
+esp_err_t storage_format(uint32_t alloc_unit_size, storage_fmt_progress_cb_t progress_cb)
 {
+    // Reentrancy guard — only one format at a time
+    static volatile bool s_format_in_progress = false;
+    if (s_format_in_progress) {
+        ESP_LOGE(TAG, "Format already in progress");
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_format_in_progress = true;
+
     static format_params_t params;
     params.alloc_unit_size = alloc_unit_size;
     params.done = false;
     params.result = ESP_FAIL;
+    s_fmt_progress = 0;
 
     // Launch format on CPU1 (no IDLE WDT → safe for long operations)
     BaseType_t ret = xTaskCreatePinnedToCore(
         format_task, "sd_fmt", 8192, &params, 3, NULL, 1);
     if (ret != pdPASS) {
+        s_format_in_progress = false;
         return ESP_ERR_NO_MEM;
     }
 
     // Poll until done — yields CPU0 so display/CDC can update
+    uint8_t last_pct = 0;
     while (!params.done) {
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(200));
+        uint8_t pct = s_fmt_progress;
+        if (pct != last_pct) {
+            ESP_LOGI(TAG, "Format progress: %d%%", pct);
+            if (progress_cb) progress_cb(pct);
+            last_pct = pct;
+        }
     }
 
+    s_format_in_progress = false;
     return params.result;
+}
+
+uint8_t storage_get_format_progress(void)
+{
+    return s_fmt_progress;
 }
 
 //--------------------------------------------------------------------+
@@ -1028,13 +1263,11 @@ esp_err_t storage_reprobe_card(void)
     s_consecutive_errors = 0;
     s_mode = STORAGE_MODE_NONE;
 
-    // Restore UHS-I DDR config for a fresh attempt
-#ifdef LYRA_SDMMC_UHS1_EXPERIMENTAL
-    s_host.max_freq_khz = 40000;
+    // Restore DDR50 config for a fresh attempt
+    s_host.max_freq_khz = SDMMC_FREQ_DDR50;
+    s_host.flags |= SDMMC_HOST_FLAG_DDR;
     s_slot_config.flags |= SDMMC_SLOT_FLAG_UHS1;
     sdmmc_host_init_slot(s_host.slot, &s_slot_config);
-    ESP_LOGI(TAG, "  UHS-I DDR config restored for reprobe (40 MHz)");
-#endif
 
     s_card = malloc(sizeof(sdmmc_card_t));
     if (!s_card) {

@@ -27,6 +27,8 @@
 #include "audio_source.h"
 #include "sd_player.h"
 #include "audio_codecs.h"
+#include "power.h"
+#include "wireless.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
@@ -1204,6 +1206,12 @@ static void sd_cmd_part(void)
     free(mbr);
 }
 
+// Format progress callback — prints percentage to CDC
+static void sd_format_progress_cb(uint8_t pct)
+{
+    cdc_printf("Format: %d%%\r\n", pct);
+}
+
 // Dispatch all "sd ..." commands. Returns true if handled.
 static bool handle_sd_command(const char *cmd)
 {
@@ -1297,9 +1305,10 @@ static bool handle_sd_command(const char *cmd)
 
     if (strcmp(cmd, "sd format") == 0) {
         cdc_printf("WARNING: This will erase ALL data and partitions!\r\n");
-        cdc_printf("Creates single partition using full card capacity.\r\n");
+        cdc_printf("Creates single partition (LBA 2048 aligned) using full card.\r\n");
+        cdc_printf("Auto-selects: FAT32 (<=32GB) or exFAT (>32GB).\r\n");
         cdc_printf("Usage: sd format confirm [alloc_size]\r\n");
-        cdc_printf("  alloc_size: 4k, 16k (default), 32k, 64k\r\n");
+        cdc_printf("  alloc_size: 4k, 16k, 32k, 64k (0=auto, default)\r\n");
         cdc_printf("Use 'sd part' to view current partition table.\r\n");
         return true;
     }
@@ -1313,12 +1322,13 @@ static bool handle_sd_command(const char *cmd)
         else if (strcmp(size_arg, "16k") == 0)  alloc = 16384;
         else if (strcmp(size_arg, "32k") == 0)  alloc = 32768;
         else if (strcmp(size_arg, "64k") == 0)  alloc = 65536;
+        else if (strcmp(size_arg, "128k") == 0) alloc = 131072;
         else if (*size_arg != '\0') {
-            cdc_printf("Invalid alloc size. Use: 4k, 16k, 32k, 64k\r\n");
+            cdc_printf("Invalid alloc size. Use: 4k, 16k, 32k, 64k, 128k\r\n");
             return true;
         }
 
-        cdc_printf("Formatting SD card as FAT32");
+        cdc_printf("Formatting SD card");
         if (alloc > 0) cdc_printf(" (alloc=%luKB)", alloc / 1024);
         cdc_printf("...\r\n");
 
@@ -1328,7 +1338,7 @@ static bool handle_sd_command(const char *cmd)
             audio_source_switch(AUDIO_SOURCE_NONE, 0, 0);
         }
 
-        esp_err_t ret = storage_format(alloc);
+        esp_err_t ret = storage_format(alloc, sd_format_progress_cb);
 
         if (prev_source != AUDIO_SOURCE_NONE) {
             audio_source_switch(prev_source, 0, 0);
@@ -1343,6 +1353,92 @@ static bool handle_sd_command(const char *cmd)
     }
 
     return false;  // Not an SD command
+}
+
+// Dispatch all "wifi ..." commands. Returns true if handled.
+static bool handle_wifi_command(const char *cmd)
+{
+    if (strcmp(cmd, "wifi scan") == 0) {
+        wireless_wifi_scan(cdc_printf);
+        return true;
+    }
+
+    if (strncmp(cmd, "wifi connect ", 13) == 0) {
+        const char *args = cmd + 13;
+        while (*args == ' ') args++;
+
+        // Parse: wifi connect <ssid> <password>
+        // SSID may not contain spaces for now; password is everything after
+        char ssid[33] = {0};
+        char pass[65] = {0};
+        const char *space = strchr(args, ' ');
+        if (space) {
+            size_t ssid_len = space - args;
+            if (ssid_len > sizeof(ssid) - 1) ssid_len = sizeof(ssid) - 1;
+            memcpy(ssid, args, ssid_len);
+            const char *p = space + 1;
+            while (*p == ' ') p++;
+            strncpy(pass, p, sizeof(pass) - 1);
+        } else {
+            strncpy(ssid, args, sizeof(ssid) - 1);
+        }
+
+        if (ssid[0] == '\0') {
+            cdc_printf("Usage: wifi connect <ssid> [password]\r\n");
+            cdc_printf("Tip: use 'wifi scan' to list available networks\r\n");
+            return true;
+        }
+
+        wireless_wifi_connect(ssid, pass, cdc_printf);
+        return true;
+    }
+
+    if (strcmp(cmd, "wifi connect") == 0) {
+        cdc_printf("Usage: wifi connect <ssid> [password]\r\n");
+        cdc_printf("Tip: use 'wifi scan' to list available networks\r\n");
+        return true;
+    }
+
+    if (strcmp(cmd, "wifi status") == 0) {
+        static const char *state_names[] = {
+            "OFF", "DISCONNECTED", "CONNECTING", "CONNECTED", "ERROR"
+        };
+        wireless_state_t st = wireless_get_state();
+        cdc_printf("WiFi: %s\r\n", state_names[st]);
+        if (st == WIRELESS_STATE_CONNECTED) {
+            char ip[16];
+            wireless_wifi_get_ip(ip, sizeof(ip));
+            cdc_printf("  IP: %s\r\n", ip);
+        }
+        return true;
+    }
+
+    if (strncmp(cmd, "wifi static ", 12) == 0) {
+        // wifi static <ssid> <pass> <ip> <gw>
+        // Example: wifi static FufosFamily MyPass123 192.168.1.200 192.168.1.1
+        char ssid[33] = {0}, pass[65] = {0}, ip[16] = {0}, gw[16] = {0};
+        int n = sscanf(cmd + 12, "%32s %64s %15s %15s", ssid, pass, ip, gw);
+        if (n >= 4) {
+            wireless_wifi_connect_static(ssid, pass, ip, gw, "255.255.255.0", cdc_printf);
+        } else {
+            cdc_printf("Usage: wifi static <ssid> <pass> <ip> <gateway>\r\n");
+            cdc_printf("Example: wifi static MyNet MyPass 192.168.1.200 192.168.1.1\r\n");
+        }
+        return true;
+    }
+
+    if (strcmp(cmd, "wifi disc") == 0) {
+        wireless_wifi_disconnect();
+        cdc_printf("WiFi disconnected\r\n");
+        return true;
+    }
+
+    if (strcmp(cmd, "wifi info") == 0) {
+        wireless_print_info(cdc_printf);
+        return true;
+    }
+
+    return false;
 }
 
 //--------------------------------------------------------------------+
@@ -1427,7 +1523,15 @@ static void cdc_task(void *arg)
                         tud_cdc_write_str("  sd msc        - Switch to storage mode\r\n");
                         tud_cdc_write_str("  sd eject      - Switch to audio mode\r\n");
                         tud_cdc_write_str("  sd part       - Show partitions\r\n");
-                        tud_cdc_write_str("  sd format     - Repartition + FAT32\r\n");
+                        tud_cdc_write_str("  sd format     - Repartition + format\r\n");
+                        tud_cdc_write_str("WiFi (ESP32-C5):\r\n");
+                        tud_cdc_write_str("  wifi scan     - Scan available networks\r\n");
+                        tud_cdc_write_str("  wifi connect <ssid> <pass> - Connect to AP\r\n");
+                        tud_cdc_write_str("  wifi static <ssid> <pass> <ip> <gw> - Static IP (diag)\r\n");
+                        tud_cdc_write_str("  wifi status   - Show WiFi state/IP\r\n");
+                        tud_cdc_write_str("  wifi disc     - Disconnect\r\n");
+                        tud_cdc_write_str("  wifi info     - Companion firmware/MAC info\r\n");
+                        tud_cdc_write_str("  ping <host>   - ICMP ping (4 packets)\r\n");
                     } else if (strcmp(rx_buf, "flat") == 0) {
                         audio_pipeline_set_preset(PRESET_FLAT);
                         cdc_printf("Preset: Flat (bypass)\r\n");
@@ -1560,6 +1664,17 @@ static void cdc_task(void *arg)
                         sd_player_cmd_playlist_info();
                     } else if (strncmp(rx_buf, "sd", 2) == 0 && handle_sd_command(rx_buf)) {
                         // Handled by handle_sd_command
+                    } else if (strncmp(rx_buf, "wifi ", 5) == 0 && handle_wifi_command(rx_buf)) {
+                        // Handled by handle_wifi_command
+                    } else if (strncmp(rx_buf, "ping ", 5) == 0) {
+                        const char *host = rx_buf + 5;
+                        while (*host == ' ') host++;
+                        if (*host) {
+                            cdc_printf("Pinging %s ...\r\n", host);
+                            wireless_ping(host, 4, cdc_printf);
+                        } else {
+                            cdc_printf("Usage: ping <host|ip>\r\n");
+                        }
                     } else {
                         cdc_printf("Unknown command. Type 'help'\r\n");
                     }
@@ -1617,6 +1732,16 @@ void app_main(void)
     // 1. I2C bus
     i2c_bus_init();
 
+    // 1.5. Power management (MAX77972 charger + fuel gauge)
+#if LYRA_HAS_MAX77972
+    esp_err_t pwr_ret = power_init(i2c_bus);
+    if (pwr_ret == ESP_OK) {
+        ESP_LOGI(TAG, "Power management OK (MAX77972, battery=%d%%)", power_get_battery_level());
+    } else {
+        ESP_LOGW(TAG, "Power management init failed (no MAX77972?) - continuing without");
+    }
+#endif
+
     // 2. I2S output at default 48kHz, 32-bit (provides MCLK/BCLK/LRCK to codec)
     i2s_output_init(48000, 32);
 
@@ -1657,6 +1782,16 @@ void app_main(void)
         }
     } else {
         ESP_LOGW(TAG, "No SD card detected (insert card and reboot, or use 'sd' command)");
+    }
+
+    // 3.8. Wireless (ESP32-C5 companion via SDIO Slot 1)
+    ESP_LOGI(TAG, "Init wireless (ESP32-C5)...");
+    esp_err_t wifi_ret = wireless_init();
+    if (wifi_ret == ESP_OK) {
+        ESP_LOGI(TAG, "Wireless OK (C5 via SDIO)");
+    } else {
+        ESP_LOGW(TAG, "Wireless init failed: %s - continuing without WiFi",
+                 esp_err_to_name(wifi_ret));
     }
 
     // 4. USB PHY + TinyUSB

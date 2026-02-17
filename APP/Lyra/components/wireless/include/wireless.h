@@ -1,14 +1,95 @@
 /**
  * @file    wireless.h
- * @date    2026-02-11
- * @brief   Public API for wireless subsystem (BT5 + WiFi6 via ESP32-C5)
+ * @brief   WiFi connectivity via ESP32-C5 companion (esp_hosted over SDIO)
  *
- * Will expose:
- * - wireless_init()            : Init SDIO to C5, establish protocol
- * - wireless_bt_pair()         : Start BT pairing mode
- * - wireless_bt_connect()      : Connect to paired device
- * - wireless_bt_stream_audio() : Send PCM audio to BT headphones
- * - wireless_wifi_connect()    : Connect to WiFi network
- * - wireless_ota_check()       : Check for firmware updates
- * - wireless_ota_apply()       : Download and apply OTA update
+ * The ESP32-C5 runs esp_hosted slave firmware and provides WiFi 6 + BT5
+ * to the ESP32-P4 host. Communication uses SDIO (Slot 1, GPIO Matrix).
+ *
+ * Phase: F7 (Wireless)
  */
+#pragma once
+
+#include "esp_err.h"
+#include <stdbool.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ── State ─────────────────────────────────────────────────────── */
+
+typedef enum {
+    WIRELESS_STATE_OFF,           // Not initialized
+    WIRELESS_STATE_DISCONNECTED,  // Initialized, no WiFi connection
+    WIRELESS_STATE_CONNECTING,    // WiFi connect in progress
+    WIRELESS_STATE_CONNECTED,     // WiFi connected, IP obtained
+    WIRELESS_STATE_ERROR,         // Init or runtime error
+} wireless_state_t;
+
+/* ── Init / Deinit ─────────────────────────────────────────────── */
+
+/**
+ * Initialize esp_hosted SDIO transport, reset C5, start WiFi subsystem.
+ * Must be called after storage_init() (SD card uses SDMMC Slot 0).
+ * Non-blocking; returns ESP_OK even if C5 is absent (state = ERROR).
+ */
+esp_err_t wireless_init(void);
+
+/* ── WiFi STA ──────────────────────────────────────────────────── */
+
+/** Printf-like callback for progress/output */
+typedef void (*wireless_print_fn_t)(const char *fmt, ...);
+
+/**
+ * Scan available WiFi networks and print results via print_fn.
+ * Blocks during scan (~3 s). Shows SSID, RSSI, channel, auth.
+ */
+esp_err_t wireless_wifi_scan(wireless_print_fn_t print_fn);
+
+/**
+ * Connect to a WiFi access point (STA mode) with step-by-step progress.
+ * Blocks until connected + IP obtained, or timeout (15 s).
+ * @param print_fn  If non-NULL, prints progress steps
+ */
+esp_err_t wireless_wifi_connect(const char *ssid, const char *password,
+                                wireless_print_fn_t print_fn);
+
+/**
+ * Connect to AP + assign static IP (bypass DHCP). For data path diagnostics.
+ * Connects WiFi L2, stops DHCP, sets static IP/GW/mask, marks state CONNECTED.
+ */
+esp_err_t wireless_wifi_connect_static(const char *ssid, const char *password,
+                                       const char *ip, const char *gw,
+                                       const char *mask,
+                                       wireless_print_fn_t print_fn);
+
+/** Disconnect from current AP. */
+esp_err_t wireless_wifi_disconnect(void);
+
+/** True if WiFi is connected and IP is available. */
+bool wireless_wifi_is_connected(void);
+
+/** Copy current IP address string into buf. Returns ESP_ERR_INVALID_STATE if not connected. */
+esp_err_t wireless_wifi_get_ip(char *buf, size_t len);
+
+/* ── Ping ──────────────────────────────────────────────────────── */
+
+/**
+ * Send ICMP ping to host/IP. Blocks until all pings complete.
+ * @param host   Hostname or dotted IP (e.g., "8.8.8.8", "google.com")
+ * @param count  Number of pings (1-20)
+ * @param print_fn  Callback for per-ping and summary output
+ */
+esp_err_t wireless_ping(const char *host, int count, wireless_print_fn_t print_fn);
+
+/* ── Status / Info ─────────────────────────────────────────────── */
+
+wireless_state_t wireless_get_state(void);
+
+/** Print C5 coprocessor info (firmware version, project, IDF) via print_fn. */
+void wireless_print_info(wireless_print_fn_t print_fn);
+
+#ifdef __cplusplus
+}
+#endif

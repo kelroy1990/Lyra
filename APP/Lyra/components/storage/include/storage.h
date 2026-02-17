@@ -50,9 +50,19 @@ storage_mode_t storage_get_mode(void);
 // Card info (only valid when mounted)
 esp_err_t storage_get_info(uint64_t *total_bytes, uint64_t *free_bytes);
 
-// Format card as FAT32 (unmounts first if needed, remounts after)
+// Format progress callback — called from polling loop on CPU0
+// percent: 0-100 (2=MBR, 5=starting mkfs, 5-95=mkfs, 96=mounting, 100=done)
+typedef void (*storage_fmt_progress_cb_t)(uint8_t percent);
+
+// Format card (unmounts first if needed, remounts after)
+// Auto-selects FAT32 (<=32GB) or exFAT (>32GB) based on card capacity.
+// Partition starts at LBA 2048 (1MB aligned, compatible with Windows/macOS/Linux).
 // alloc_unit_size: allocation unit in bytes (e.g. 16384 for 16KB), 0 = auto
-esp_err_t storage_format(uint32_t alloc_unit_size);
+// progress_cb: optional callback for progress updates (NULL = no callback)
+esp_err_t storage_format(uint32_t alloc_unit_size, storage_fmt_progress_cb_t progress_cb);
+
+// Get current format progress (0-100), or 0 if not formatting
+uint8_t storage_get_format_progress(void);
 
 // Re-probe the SD card (resets DDR50 config, retries init)
 // Useful after hot-insert without CD pin, or manual recovery

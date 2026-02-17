@@ -1,0 +1,56 @@
+# =============================================================================
+# Lyra sdkconfig.defaults
+# Applied on first build or after 'idf.py fullclean'
+# =============================================================================
+
+# ── ESP32-P4 Target ──
+CONFIG_IDF_TARGET="esp32p4"
+
+# ── WiFi Remote + ESP-Hosted (WiFi via SDIO companion) ──
+# Companion: Dev board = ESP32-C6-MINI-1, Final Lyra = ESP32-C5-WROOM-1U-N8R8
+# Chain: esp_wifi_remote → esp_hosted (SDIO transport) → companion slave
+#
+# CRITICAL: These Kconfig options are interdependent.
+# After 'idf.py fullclean && idf.py reconfigure', run:
+#   idf.py menuconfig
+# and configure:
+#   Component config → Wi-Fi Remote → Choose slave target → ESP32-C6 (dev) / ESP32-C5 (final)
+#   Component config → ESP-Hosted config → Host Interface → SDIO
+#   Component config → ESP-Hosted config → Development Board → No development board
+#   Component config → ESP-Hosted config → SDIO Configuration →
+#     SDIO Slot: Slot 1 (GPIO Matrix)
+#     CMD=19, CLK=18, D0=14, D1=15, D2=16, D3=17
+#     Reset GPIO=54
+#     4-bit bus: enabled
+
+# ── Flash & Partition Table ──
+# Dev board: GD25Q256EYIGR (32MB), Final board: W25Q64JVZPIQ (8MB)
+# Target 8MB (minimum) so same firmware works on both
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ── Wi-Fi Performance (P4 + C6 co-processor) ──
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=16
+CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM=64
+CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM=64
+CONFIG_WIFI_RMT_AMPDU_TX_ENABLED=y
+CONFIG_WIFI_RMT_TX_BA_WIN=32
+CONFIG_WIFI_RMT_AMPDU_RX_ENABLED=y
+CONFIG_WIFI_RMT_RX_BA_WIN=32
+
+# ── lwIP / Network ──
+CONFIG_LWIP_IPV4=y
+CONFIG_LWIP_ICMP=y
+CONFIG_LWIP_RAW=y
+CONFIG_LWIP_DNS_MAX_SERVERS=2
+CONFIG_LWIP_DHCP_DOES_ARP_CHECK=n
+CONFIG_LWIP_NETIF_LOOPBACK=y
+
+# ── TCP/IP Performance ──
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
+CONFIG_LWIP_TCP_WND_DEFAULT=65534
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+CONFIG_LWIP_TCP_SACK_OUT=y
