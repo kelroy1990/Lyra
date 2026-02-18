@@ -1355,6 +1355,14 @@ static bool handle_sd_command(const char *cmd)
     return false;  // Not an SD command
 }
 
+static void speed_test_task(void *arg)
+{
+    const char *url = (const char *)arg;
+    wireless_speed_test(url[0] ? url : NULL, cdc_printf);
+    cdc_printf("> ");
+    vTaskDelete(NULL);
+}
+
 // Dispatch all "wifi ..." commands. Returns true if handled.
 static bool handle_wifi_command(const char *cmd)
 {
@@ -1399,6 +1407,11 @@ static bool handle_wifi_command(const char *cmd)
         return true;
     }
 
+    if (strcmp(cmd, "wifi diag") == 0) {
+        wireless_wifi_diag(cdc_printf);
+        return true;
+    }
+
     if (strcmp(cmd, "wifi status") == 0) {
         static const char *state_names[] = {
             "OFF", "DISCONNECTED", "CONNECTING", "CONNECTED", "ERROR"
@@ -1435,6 +1448,30 @@ static bool handle_wifi_command(const char *cmd)
 
     if (strcmp(cmd, "wifi info") == 0) {
         wireless_print_info(cdc_printf);
+        return true;
+    }
+
+    if (strncmp(cmd, "wifi speed", 10) == 0) {
+        /* wifi speed [url]
+         * Default: downloads from public HTTP speed test server
+         * Local:   wifi speed http://<PC_IP>:8080/file.bin
+         * Runs in a background task so "wifi stop" can abort it. */
+        static char speed_url[256];
+        const char *args = cmd + 10;
+        while (*args == ' ') args++;
+        if (*args) {
+            strncpy(speed_url, args, sizeof(speed_url) - 1);
+            speed_url[sizeof(speed_url) - 1] = '\0';
+        } else {
+            speed_url[0] = '\0';
+        }
+        static TaskHandle_t speed_task;
+        xTaskCreate(speed_test_task, "speed", 4096, speed_url, 5, &speed_task);
+        return true;
+    }
+
+    if (strcmp(cmd, "wifi stop") == 0) {
+        wireless_speed_test_abort();
         return true;
     }
 
@@ -1528,9 +1565,12 @@ static void cdc_task(void *arg)
                         tud_cdc_write_str("  wifi scan     - Scan available networks\r\n");
                         tud_cdc_write_str("  wifi connect <ssid> <pass> - Connect to AP\r\n");
                         tud_cdc_write_str("  wifi static <ssid> <pass> <ip> <gw> - Static IP (diag)\r\n");
+                        tud_cdc_write_str("  wifi diag     - Network layer diagnostics\r\n");
                         tud_cdc_write_str("  wifi status   - Show WiFi state/IP\r\n");
                         tud_cdc_write_str("  wifi disc     - Disconnect\r\n");
                         tud_cdc_write_str("  wifi info     - Companion firmware/MAC info\r\n");
+                        tud_cdc_write_str("  wifi speed [url]  - HTTP download speed test\r\n");
+                        tud_cdc_write_str("  wifi stop         - Abort speed test\r\n");
                         tud_cdc_write_str("  ping <host>   - ICMP ping (4 packets)\r\n");
                     } else if (strcmp(rx_buf, "flat") == 0) {
                         audio_pipeline_set_preset(PRESET_FLAT);
@@ -1633,9 +1673,15 @@ static void cdc_task(void *arg)
                         } else {
                             cdc_printf("malloc failed\r\n");
                         }
-                        cdc_printf("Heap: %lu free, %lu min-ever\r\n",
-                                   (unsigned long)esp_get_free_heap_size(),
-                                   (unsigned long)esp_get_minimum_free_heap_size());
+                        size_t int_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+                        size_t int_min  = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+                        size_t spi_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+                        size_t spi_tot  = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+                        cdc_printf("Internal: %lu free (%lu min-ever)\r\n",
+                                   (unsigned long)int_free, (unsigned long)int_min);
+                        cdc_printf("PSRAM:    %lu free / %lu total (%lu used)\r\n",
+                                   (unsigned long)spi_free, (unsigned long)spi_tot,
+                                   (unsigned long)(spi_tot - spi_free));
                     } else if (strncmp(rx_buf, "play ", 5) == 0) {
                         const char *arg = rx_buf + 5;
                         while (*arg == ' ') arg++;

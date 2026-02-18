@@ -27,6 +27,7 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
+#include "esp_netif_net_stack.h"
 #include "esp_event.h"
 #include "esp_hosted.h"
 #include "esp_hosted_misc.h"
@@ -35,10 +36,14 @@
 #include "lwip/inet.h"
 #include "lwip/netdb.h"
 #include "lwip/ip_addr.h"
-
+#include "lwip/dhcp.h"
+#include "lwip/netif.h"
+#include "lwip/dns.h"
+#include "esp_timer.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "wireless";
 
@@ -59,6 +64,11 @@ static esp_netif_t      *s_sta_netif   = NULL;
 static SemaphoreHandle_t s_connect_sem = NULL;
 static char              s_ip_str[16]  = {0};
 
+static volatile bool     s_speed_abort = false;
+
+/* Forward declarations */
+static bool diag_ping_one(ip_addr_t *target, uint32_t *out_ms);
+
 /* ── Event handlers ────────────────────────────────────────────── */
 
 static void wifi_event_handler(void *arg, esp_event_base_t base,
@@ -75,9 +85,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
             if (s_sta_netif) {
                 esp_netif_ip_info_t ip_info;
                 esp_netif_get_ip_info(s_sta_netif, &ip_info);
+                struct netif *nif = (struct netif *)esp_netif_get_netif_impl(s_sta_netif);
                 ESP_LOGI(TAG, "netif flags: UP=%d, link_UP=%d",
                          esp_netif_is_netif_up(s_sta_netif),
-                         esp_netif_is_netif_up(s_sta_netif));
+                         nif ? netif_is_link_up(nif) : 0);
                 ESP_LOGI(TAG, "netif IP (pre-DHCP): " IPSTR, IP2STR(&ip_info.ip));
                 esp_netif_dhcp_status_t dhcp_status;
                 esp_err_t dret = esp_netif_dhcpc_get_status(s_sta_netif, &dhcp_status);
@@ -108,7 +119,42 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
         ESP_LOGI(TAG, "Got IP: %s", s_ip_str);
+        ESP_LOGI(TAG, "Gateway: " IPSTR, IP2STR(&ev->ip_info.gw));
+        ESP_LOGI(TAG, "Netmask: " IPSTR, IP2STR(&ev->ip_info.netmask));
+
+        /* DNS fallback — priority: Google (8.8.8.8) > Cloudflare (1.1.1.1)
+         *
+         * ESP-IDF lwIP (ESP_DNS=1) reserves DNS slot 1 as "fallback"
+         * and DHCP skips it (dhcp.c:805). So only DNS0 comes from DHCP.
+         *
+         * Cases:
+         *   DHCP gave DNS0 + DNS1  → keep both (nothing to do)
+         *   DHCP gave DNS0 only    → DNS1 = Google
+         *   DHCP gave nothing      → DNS0 = Google, DNS1 = Cloudflare
+         */
+        ip_addr_t dns0 = *dns_getserver(0);
+        ip_addr_t dns1 = *dns_getserver(1);
+        ESP_LOGI(TAG, "DNS0 (from DHCP): %s", ipaddr_ntoa(&dns0));
+        ESP_LOGI(TAG, "DNS1 (fallback slot): %s", ipaddr_ntoa(&dns1));
+
+        ip_addr_t google_dns, cf_dns;
+        ipaddr_aton("8.8.8.8", &google_dns);
+        ipaddr_aton("1.1.1.1", &cf_dns);
+
+        if (ip_addr_isany(&dns0) && ip_addr_isany(&dns1)) {
+            dns_setserver(0, &google_dns);
+            dns_setserver(1, &cf_dns);
+            ESP_LOGW(TAG, "No DNS from DHCP — set DNS0=8.8.8.8, DNS1=1.1.1.1");
+        } else if (ip_addr_isany(&dns1)) {
+            dns_setserver(1, &google_dns);
+            ESP_LOGI(TAG, "Set DNS1 = 8.8.8.8 (fallback)");
+        } else if (ip_addr_isany(&dns0)) {
+            dns_setserver(0, &google_dns);
+            ESP_LOGW(TAG, "DNS0 empty — set DNS0 = 8.8.8.8");
+        }
+
         s_state = WIRELESS_STATE_CONNECTED;
+
         if (s_connect_sem) {
             xSemaphoreGive(s_connect_sem);
         }
@@ -226,8 +272,23 @@ esp_err_t wireless_init(void)
 
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    /*
+     * Disable WiFi modem sleep on the companion chip.
+     * With power save enabled the C6 radio goes dormant after a few
+     * seconds, killing the data path while lwIP still shows CONNECTED.
+     * esp_wifi_set_ps() is forwarded to the slave via esp_wifi_remote.
+     */
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
     s_connect_sem = xSemaphoreCreateBinary();
     s_state = WIRELESS_STATE_DISCONNECTED;
+
+    /*
+     * NOTE: After cold boot the C6 companion may need a few extra seconds
+     * before SDIO data path is fully stable. The first wifi connect attempt
+     * can fail with "DHCP: not initialized". A second attempt succeeds.
+     * TODO: add automatic retry or readiness check if this becomes a UX issue.
+     */
 
     ESP_LOGI(TAG, "Wireless ready (C5 via SDIO, WiFi STA mode)");
     return ESP_OK;
@@ -313,6 +374,50 @@ esp_err_t wireless_wifi_scan(wireless_print_fn_t print_fn)
     return ESP_OK;
 }
 
+/* ── DHCP diagnostics ──────────────────────────────────────────── */
+
+/**
+ * Log lwIP internal DHCP state — helps identify where DHCP gets stuck:
+ *   SELECTING(6) = DISCOVER sent, no OFFER received
+ *   REQUESTING(1) = OFFER received, REQUEST sent, no ACK
+ *   CHECKING(8) = ACK received, ARP probe in progress
+ *   BOUND(10) = IP assigned (success)
+ */
+static void log_dhcp_state(wireless_print_fn_t print_fn)
+{
+    if (!s_sta_netif) return;
+
+    struct netif *n = (struct netif *)esp_netif_get_netif_impl(s_sta_netif);
+    if (!n) return;
+
+    struct dhcp *d = netif_dhcp_data(n);
+    if (!d) {
+        ESP_LOGW(TAG, "DHCP data NULL (never started?)");
+        if (print_fn) print_fn("  DHCP: not initialized\r\n");
+        return;
+    }
+
+    static const char *state_names[] = {
+        [0] = "OFF", [1] = "REQUESTING", [2] = "INIT",
+        [3] = "REBOOTING", [4] = "REBINDING", [5] = "RENEWING",
+        [6] = "SELECTING", [7] = "INFORMING", [8] = "CHECKING",
+        [9] = "PERMANENT", [10] = "BOUND", [11] = "RELEASING",
+        [12] = "BACKING_OFF",
+    };
+    const char *sn = (d->state <= 12) ? state_names[d->state] : "?";
+
+    ESP_LOGW(TAG, "DHCP: state=%d(%s) tries=%d  netif: up=%d link=%d ip=" IPSTR,
+             d->state, sn, d->tries,
+             netif_is_up(n), netif_is_link_up(n),
+             IP2STR(netif_ip4_addr(n)));
+
+    if (print_fn) {
+        print_fn("  DHCP: state=%d(%s) tries=%d, netif up=%d link=%d\r\n",
+                 d->state, sn, d->tries,
+                 netif_is_up(n), netif_is_link_up(n));
+    }
+}
+
 /* ── WiFi STA Connect ─────────────────────────────────────────── */
 
 esp_err_t wireless_wifi_connect(const char *ssid, const char *password,
@@ -326,15 +431,15 @@ esp_err_t wireless_wifi_connect(const char *ssid, const char *password,
 
     /* Step 1: Disconnect if needed */
     if (s_state == WIRELESS_STATE_CONNECTED) {
-        if (print_fn) print_fn("[1/4] Disconnecting from current AP...\r\n");
+        if (print_fn) print_fn("[1/3] Disconnecting...\r\n");
         esp_wifi_disconnect();
-        vTaskDelay(pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(500));
     } else {
-        if (print_fn) print_fn("[1/4] Preparing connection...\r\n");
+        if (print_fn) print_fn("[1/3] Preparing...\r\n");
     }
 
-    /* Step 2: Configure */
-    if (print_fn) print_fn("[2/4] Setting WiFi config (SSID: %s)...\r\n", ssid);
+    /* Step 2: Configure WiFi */
+    if (print_fn) print_fn("[2/3] Connecting to '%s'...\r\n", ssid);
 
     wifi_config_t wifi_cfg = {0};
     strncpy((char *)wifi_cfg.sta.ssid, ssid, sizeof(wifi_cfg.sta.ssid) - 1);
@@ -344,7 +449,6 @@ esp_err_t wireless_wifi_connect(const char *ssid, const char *password,
         wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     } else {
         wifi_cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;
-        if (print_fn) print_fn("       (open network, no password)\r\n");
     }
 
     esp_err_t ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
@@ -354,9 +458,15 @@ esp_err_t wireless_wifi_connect(const char *ssid, const char *password,
         return ret;
     }
 
-    /* Step 3: Connect */
-    if (print_fn) print_fn("[3/4] Connecting to AP...\r\n");
-
+    /* Step 3: Connect and wait for DHCP
+     *
+     * The default handler in esp_wifi_remote_net2.c automatically:
+     *   1. Sets RX callback (s_rx_fn) at STA_CONNECTED
+     *   2. Calls esp_netif_action_connected() which starts DHCP
+     *
+     * We do NOT manually stop/start DHCP — that interferes with the
+     * default handler and causes "invalid static ip" errors.
+     */
     s_state = WIRELESS_STATE_CONNECTING;
     xSemaphoreTake(s_connect_sem, 0);
 
@@ -368,24 +478,36 @@ esp_err_t wireless_wifi_connect(const char *ssid, const char *password,
         return ret;
     }
 
-    /* Step 4: Wait for IP */
-    if (print_fn) print_fn("[4/4] Waiting for IP (max 15s)...\r\n");
+    if (print_fn) print_fn("[3/3] Waiting for IP (DHCP)...\r\n");
 
-    if (xSemaphoreTake(s_connect_sem, pdMS_TO_TICKS(15000)) != pdTRUE) {
-        if (print_fn) print_fn("FAIL: timeout waiting for IP\r\n");
-        ESP_LOGW(TAG, "WiFi connect timeout");
-        esp_wifi_disconnect();
-        s_state = WIRELESS_STATE_DISCONNECTED;
-        return ESP_ERR_TIMEOUT;
+    /* Wait with periodic DHCP state logging (8 × 2s = 16s max) */
+    bool got_sem = false;
+    for (int i = 0; i < 8; i++) {
+        if (xSemaphoreTake(s_connect_sem, pdMS_TO_TICKS(2000)) == pdTRUE) {
+            got_sem = true;
+            break;
+        }
+        /* Disconnected while waiting? */
+        if (s_state == WIRELESS_STATE_DISCONNECTED) {
+            if (print_fn) print_fn("FAIL: disconnected\r\n");
+            return ESP_FAIL;
+        }
+        /* Log DHCP progress every 2s */
+        log_dhcp_state(print_fn);
     }
 
-    if (s_state == WIRELESS_STATE_CONNECTED) {
-        if (print_fn) print_fn("OK! Connected. IP: %s\r\n", s_ip_str);
+    if (got_sem && s_state == WIRELESS_STATE_CONNECTED) {
+        if (print_fn) print_fn("OK! IP: %s\r\n", s_ip_str);
         return ESP_OK;
     }
 
-    if (print_fn) print_fn("FAIL: connection rejected (wrong password?)\r\n");
-    return ESP_FAIL;
+    /* Timeout — final DHCP state dump */
+    log_dhcp_state(print_fn);
+    if (print_fn) print_fn("FAIL: DHCP timeout (no IP in ~16s)\r\n");
+    ESP_LOGW(TAG, "WiFi DHCP timeout");
+    esp_wifi_disconnect();
+    s_state = WIRELESS_STATE_DISCONNECTED;
+    return ESP_ERR_TIMEOUT;
 }
 
 esp_err_t wireless_wifi_connect_static(const char *ssid, const char *password,
@@ -583,17 +705,17 @@ esp_err_t wireless_ping(const char *host, int count, wireless_print_fn_t print_f
         /* DNS lookup */
         struct addrinfo hints = { .ai_family = AF_INET };
         struct addrinfo *res  = NULL;
-        int err = getaddrinfo(host, NULL, &hints, &res);
+        int err = lwip_getaddrinfo(host, NULL, &hints, &res);
         if (err != 0 || !res) {
             print_fn("DNS failed for '%s'\r\n", host);
-            if (res) freeaddrinfo(res);
+            if (res) lwip_freeaddrinfo(res);
             return ESP_ERR_NOT_FOUND;
         }
         struct sockaddr_in *sa = (struct sockaddr_in *)res->ai_addr;
         inet_addr_to_ip4addr(ip_2_ip4(&target_addr), &sa->sin_addr);
         target_addr.type = IPADDR_TYPE_V4;
         print_fn("Resolved %s -> %s\r\n", host, ipaddr_ntoa(&target_addr));
-        freeaddrinfo(res);
+        lwip_freeaddrinfo(res);
     }
 
     /* Ping context (lives on caller's stack, outlives the session) */
@@ -637,6 +759,479 @@ esp_err_t wireless_ping(const char *host, int count, wireless_print_fn_t print_f
     vSemaphoreDelete(ctx.done_sem);
 
     return ESP_OK;
+}
+
+/* ── Network diagnostics ──────────────────────────────────────── */
+
+/** Single-ping helper for diagnostics. Returns true if reply received. */
+typedef struct {
+    SemaphoreHandle_t sem;
+    bool              ok;
+    uint32_t          time_ms;
+} diag_ping_ctx_t;
+
+static void diag_ping_ok(esp_ping_handle_t hdl, void *args)
+{
+    diag_ping_ctx_t *c = (diag_ping_ctx_t *)args;
+    esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &c->time_ms, sizeof(c->time_ms));
+    c->ok = true;
+    /* Don't signal here — wait for on_ping_end (last callback) */
+}
+
+static void diag_ping_tmo(esp_ping_handle_t hdl, void *args)
+{
+    diag_ping_ctx_t *c = (diag_ping_ctx_t *)args;
+    c->ok = false;
+    /* Don't signal here — wait for on_ping_end (last callback) */
+}
+
+static void diag_ping_end(esp_ping_handle_t hdl, void *args)
+{
+    diag_ping_ctx_t *c = (diag_ping_ctx_t *)args;
+    xSemaphoreGive(c->sem);
+}
+
+static bool diag_ping_one(ip_addr_t *target, uint32_t *out_ms)
+{
+    diag_ping_ctx_t ctx = {
+        .sem = xSemaphoreCreateBinary(),
+        .ok  = false,
+        .time_ms = 0,
+    };
+    if (!ctx.sem) return false;
+
+    esp_ping_config_t pcfg = ESP_PING_DEFAULT_CONFIG();
+    pcfg.target_addr     = *target;
+    pcfg.count           = 1;
+    pcfg.interval_ms     = 1000;
+    pcfg.timeout_ms      = 3000;
+    pcfg.task_stack_size  = 4096;
+
+    esp_ping_callbacks_t cbs = {
+        .on_ping_success = diag_ping_ok,
+        .on_ping_timeout = diag_ping_tmo,
+        .on_ping_end     = diag_ping_end,
+        .cb_args         = &ctx,
+    };
+
+    esp_ping_handle_t hdl;
+    if (esp_ping_new_session(&pcfg, &cbs, &hdl) != ESP_OK) {
+        vSemaphoreDelete(ctx.sem);
+        return false;
+    }
+
+    esp_ping_start(hdl);
+    xSemaphoreTake(ctx.sem, pdMS_TO_TICKS(5000));
+    esp_ping_stop(hdl);
+    esp_ping_delete_session(hdl);
+    vSemaphoreDelete(ctx.sem);
+
+    if (out_ms) *out_ms = ctx.time_ms;
+    return ctx.ok;
+}
+
+esp_err_t wireless_wifi_diag(wireless_print_fn_t print_fn)
+{
+    if (s_state != WIRELESS_STATE_CONNECTED) {
+        print_fn("Error: WiFi not connected\r\n");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    print_fn("=== Network Diagnostics ===\r\n");
+
+    /* L2: WiFi state */
+    print_fn("[L2] WiFi: CONNECTED\r\n");
+
+    /* L3: IP / Gateway / Netmask */
+    esp_netif_ip_info_t ip_info;
+    esp_netif_get_ip_info(s_sta_netif, &ip_info);
+    print_fn("[L3] IP: " IPSTR "  GW: " IPSTR "  Mask: " IPSTR "\r\n",
+             IP2STR(&ip_info.ip), IP2STR(&ip_info.gw), IP2STR(&ip_info.netmask));
+
+    /* L3: netif flags */
+    struct netif *n = (struct netif *)esp_netif_get_netif_impl(s_sta_netif);
+    if (n) {
+        print_fn("[L3] netif: UP=%d, LINK_UP=%d\r\n",
+                 netif_is_up(n), netif_is_link_up(n));
+    }
+
+    /* DHCP state */
+    if (n) {
+        struct dhcp *d = netif_dhcp_data(n);
+        if (d) {
+            static const char *snames[] = {
+                [0]="OFF", [1]="REQUESTING", [2]="INIT", [3]="REBOOTING",
+                [4]="REBINDING", [5]="RENEWING", [6]="SELECTING",
+                [7]="INFORMING", [8]="CHECKING", [9]="PERMANENT",
+                [10]="BOUND", [11]="RELEASING", [12]="BACKING_OFF",
+            };
+            const char *sn = (d->state <= 12) ? snames[d->state] : "?";
+            print_fn("[L3] DHCP: state=%d(%s) tries=%d\r\n",
+                     d->state, sn, d->tries);
+        }
+    }
+
+    /* DNS servers */
+    ip_addr_t dns0 = *dns_getserver(0);
+    ip_addr_t dns1 = *dns_getserver(1);
+    /* ipaddr_ntoa uses static buffer — print separately */
+    print_fn("[DNS] DNS0: %s", ipaddr_ntoa(&dns0));
+    print_fn("   DNS1: %s\r\n", ipaddr_ntoa(&dns1));
+
+    /* Ping gateway */
+    if (ip_info.gw.addr != 0) {
+        ip_addr_t gw_addr;
+        ip_addr_set_ip4_u32_val(gw_addr, ip_info.gw.addr);
+        uint32_t ms = 0;
+        print_fn("[L3] Ping gateway " IPSTR " ... ", IP2STR(&ip_info.gw));
+        if (diag_ping_one(&gw_addr, &ms)) {
+            print_fn("OK (%lums)\r\n", (unsigned long)ms);
+        } else {
+            print_fn("FAIL\r\n");
+        }
+    } else {
+        print_fn("[L3] Gateway: not set!\r\n");
+    }
+
+    /* Ping 8.8.8.8 */
+    {
+        ip_addr_t inet_addr;
+        ipaddr_aton("8.8.8.8", &inet_addr);
+        uint32_t ms = 0;
+        print_fn("[L3] Ping 8.8.8.8 ... ");
+        if (diag_ping_one(&inet_addr, &ms)) {
+            print_fn("OK (%lums)\r\n", (unsigned long)ms);
+        } else {
+            print_fn("FAIL\r\n");
+        }
+    }
+
+    /* DNS resolution test */
+    {
+        struct addrinfo hints = { .ai_family = AF_INET };
+        struct addrinfo *res = NULL;
+        print_fn("[DNS] Resolve google.com ... ");
+        int err = lwip_getaddrinfo("google.com", NULL, &hints, &res);
+        if (err == 0 && res) {
+            struct sockaddr_in *sa = (struct sockaddr_in *)res->ai_addr;
+            char ip_str[16];
+            inet_ntoa_r(sa->sin_addr, ip_str, sizeof(ip_str));
+            print_fn("OK (%s)\r\n", ip_str);
+            lwip_freeaddrinfo(res);
+        } else {
+            print_fn("FAIL (err=%d)\r\n", err);
+            if (res) lwip_freeaddrinfo(res);
+        }
+    }
+
+    print_fn("=== End ===\r\n");
+    return ESP_OK;
+}
+
+/* ── Speed test (HTTP download) ───────────────────────────────── */
+
+#include "lwip/sockets.h"
+
+#define SPEED_BUF_SIZE      16384
+#define SPEED_DEFAULT_URL   "http://speedtest.tele2.net/10MB.zip"
+#define SPEED_MAX_REDIRECTS 3
+
+/**
+ * Parse "http://host[:port]/path" into components.
+ * Returns false if scheme is not http:// .
+ */
+static bool parse_http_url(const char *url, char *host, size_t host_len,
+                           char *path, size_t path_len, uint16_t *port)
+{
+    if (strncmp(url, "http://", 7) != 0) return false;
+    const char *h = url + 7;
+    const char *slash = strchr(h, '/');
+    const char *colon = NULL;
+
+    /* Find ':' only within the host part (before first '/') */
+    for (const char *p = h; p < (slash ? slash : h + strlen(h)); p++) {
+        if (*p == ':') { colon = p; break; }
+    }
+
+    if (colon) {
+        size_t hlen = colon - h;
+        if (hlen == 0 || hlen >= host_len) return false;
+        memcpy(host, h, hlen);
+        host[hlen] = '\0';
+        *port = (uint16_t)atoi(colon + 1);
+    } else {
+        *port = 80;
+        size_t hlen = slash ? (size_t)(slash - h) : strlen(h);
+        if (hlen == 0 || hlen >= host_len) return false;
+        memcpy(host, h, hlen);
+        host[hlen] = '\0';
+    }
+
+    if (slash) {
+        strncpy(path, slash, path_len - 1);
+        path[path_len - 1] = '\0';
+    } else {
+        strncpy(path, "/", path_len - 1);
+    }
+    return true;
+}
+
+/**
+ * HTTP GET one attempt: connect, send request, read response headers.
+ * Returns the connected socket with headers consumed, or -1 on error.
+ * On redirect (301/302), fills redirect_url and returns -2.
+ */
+static int speed_http_get(const char *host, uint16_t port, const char *path,
+                          wireless_print_fn_t print_fn,
+                          uint8_t *buf, int *out_content_length,
+                          size_t *out_body_in_buf,
+                          char *redirect_url, size_t redirect_url_len)
+{
+    *out_content_length = -1;
+    *out_body_in_buf = 0;
+
+    /* DNS resolve */
+    struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM };
+    struct addrinfo *res = NULL;
+    int dns_err = lwip_getaddrinfo(host, NULL, &hints, &res);
+    if (dns_err != 0 || !res) {
+        print_fn("DNS failed for '%s' (err=%d)\r\n", host, dns_err);
+        if (res) lwip_freeaddrinfo(res);
+        return -1;
+    }
+    struct sockaddr_in dest;
+    memcpy(&dest, res->ai_addr, sizeof(dest));
+    dest.sin_port = htons(port);
+    char ip_str[16];
+    inet_ntoa_r(dest.sin_addr, ip_str, sizeof(ip_str));
+    print_fn("Resolved %s -> %s\r\n", host, ip_str);
+    lwip_freeaddrinfo(res);
+
+    /* Connect with send timeout (affects connect on lwIP) */
+    print_fn("Connecting to %s:%d...\r\n", ip_str, port);
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock < 0) {
+        print_fn("Socket error (errno=%d)\r\n", errno);
+        return -1;
+    }
+
+    struct timeval tv = { .tv_sec = 10 };
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    if (connect(sock, (struct sockaddr *)&dest, sizeof(dest)) != 0) {
+        print_fn("Connect failed (errno=%d)\r\n", errno);
+        close(sock);
+        return -1;
+    }
+    print_fn("Connected.\r\n");
+
+    /* Send HTTP GET */
+    char req[256];
+    int req_len = snprintf(req, sizeof(req),
+        "GET %s HTTP/1.0\r\n"
+        "Host: %s\r\n"
+        "User-Agent: Lyra/1.0\r\n"
+        "\r\n", path, host);
+
+    if (send(sock, req, req_len, 0) != req_len) {
+        print_fn("Send failed (errno=%d)\r\n", errno);
+        close(sock);
+        return -1;
+    }
+
+    /* Read headers — find \r\n\r\n */
+    size_t hdr_used = 0;
+    bool headers_done = false;
+    size_t hdr_end_offset = 0;
+
+    while (!headers_done && hdr_used < SPEED_BUF_SIZE - 1) {
+        int r = recv(sock, buf + hdr_used, SPEED_BUF_SIZE - 1 - hdr_used, 0);
+        if (r <= 0) break;
+        hdr_used += r;
+        buf[hdr_used] = '\0';
+
+        char *end = strstr((char *)buf, "\r\n\r\n");
+        if (end) {
+            hdr_end_offset = (end - (char *)buf) + 4;
+            headers_done = true;
+        }
+    }
+
+    if (!headers_done) {
+        print_fn("No HTTP response (errno=%d)\r\n", errno);
+        close(sock);
+        return -1;
+    }
+
+    /* Parse HTTP status */
+    int http_status = 0;
+    sscanf((char *)buf, "HTTP/%*d.%*d %d", &http_status);
+
+    /* Handle redirects */
+    if (http_status == 301 || http_status == 302 || http_status == 307) {
+        char *loc = strstr((char *)buf, "Location:");
+        if (!loc) loc = strstr((char *)buf, "location:");
+        if (loc) {
+            loc += 9;
+            while (*loc == ' ') loc++;
+            char *eol = strchr(loc, '\r');
+            if (eol) *eol = '\0';
+            strncpy(redirect_url, loc, redirect_url_len - 1);
+            redirect_url[redirect_url_len - 1] = '\0';
+        }
+        close(sock);
+        return -2;  /* redirect */
+    }
+
+    if (http_status < 200 || http_status >= 300) {
+        char *eol = strchr((char *)buf, '\r');
+        if (eol) *eol = '\0';
+        print_fn("HTTP %d: %s\r\n", http_status, (char *)buf);
+        close(sock);
+        return -1;
+    }
+
+    /* Parse Content-Length */
+    char *cl = strstr((char *)buf, "Content-Length:");
+    if (!cl) cl = strstr((char *)buf, "content-length:");
+    if (cl) *out_content_length = atoi(cl + 15);
+
+    *out_body_in_buf = hdr_used - hdr_end_offset;
+    return sock;  /* success — caller owns the socket */
+}
+
+esp_err_t wireless_speed_test(const char *url, wireless_print_fn_t print_fn)
+{
+    if (s_state != WIRELESS_STATE_CONNECTED) {
+        print_fn("Error: WiFi not connected\r\n");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!url || !url[0]) url = SPEED_DEFAULT_URL;
+
+    uint8_t *buf = heap_caps_malloc(SPEED_BUF_SIZE, MALLOC_CAP_SPIRAM);
+    if (!buf) buf = malloc(SPEED_BUF_SIZE);  /* fallback to internal */
+    if (!buf) return ESP_ERR_NO_MEM;
+
+    /* Follow redirects (HTTP→HTTP only) */
+    char current_url[256];
+    strncpy(current_url, url, sizeof(current_url) - 1);
+    current_url[sizeof(current_url) - 1] = '\0';
+
+    int sock = -1;
+    int content_length = -1;
+    size_t body_in_buf = 0;
+
+    for (int redir = 0; redir <= SPEED_MAX_REDIRECTS; redir++) {
+        char host[64], path[128];
+        uint16_t port;
+
+        if (!parse_http_url(current_url, host, sizeof(host),
+                            path, sizeof(path), &port)) {
+            if (strncmp(current_url, "https://", 8) == 0) {
+                print_fn("HTTPS not supported (no TLS). Cannot follow redirect.\r\n");
+            } else {
+                print_fn("Invalid URL: %s\r\n", current_url);
+            }
+            free(buf);
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        print_fn("%sDownload: %s\r\n", redir ? "\r\n" : "", current_url);
+
+        char redirect_url[256] = {0};
+        sock = speed_http_get(host, port, path, print_fn, buf,
+                              &content_length, &body_in_buf,
+                              redirect_url, sizeof(redirect_url));
+
+        if (sock == -2) {
+            /* Redirect */
+            print_fn("Redirect -> %s\r\n", redirect_url);
+            strncpy(current_url, redirect_url, sizeof(current_url) - 1);
+            current_url[sizeof(current_url) - 1] = '\0';
+            continue;
+        }
+        break;  /* success or error */
+    }
+
+    if (sock < 0) {
+        free(buf);
+        return ESP_FAIL;
+    }
+
+    /* Download body and measure speed */
+    uint32_t total_bytes = (uint32_t)body_in_buf;
+
+    if (content_length > 0) {
+        print_fn("File: %d bytes (%.1f KB)\r\n",
+                 content_length, (float)content_length / 1024.0f);
+    }
+    print_fn("Downloading...\r\n");
+
+    int64_t t_start = esp_timer_get_time();
+    int64_t last_progress = t_start;
+
+    /* 1s recv timeout — short so "wifi stop" abort is responsive */
+    struct timeval tv = { .tv_sec = 1 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    s_speed_abort = false;
+
+    int stall_count = 0;
+    while (!s_speed_abort) {
+        int r = recv(sock, buf, SPEED_BUF_SIZE, 0);
+        if (r < 0 && errno == EAGAIN) {
+            if (++stall_count >= 5) break;  /* 5s with no data → done */
+            continue;
+        }
+        if (r <= 0) break;
+        stall_count = 0;
+        total_bytes += r;
+
+        /* Progress every ~2 seconds */
+        int64_t now = esp_timer_get_time();
+        if (now - last_progress > 2000000) {
+            float elapsed = (float)(now - t_start) / 1000000.0f;
+            float cur_kBs = (elapsed > 0) ? ((float)total_bytes / elapsed / 1024.0f) : 0;
+            if (content_length > 0) {
+                int pct = (int)((uint64_t)total_bytes * 100 / content_length);
+                print_fn("  %lu/%d (%d%%) %.0f KB/s\r\n",
+                         (unsigned long)total_bytes, content_length, pct, cur_kBs);
+            } else {
+                print_fn("  %lu bytes %.0f KB/s\r\n",
+                         (unsigned long)total_bytes, cur_kBs);
+            }
+            last_progress = now;
+        }
+    }
+
+    bool aborted = s_speed_abort;
+    s_speed_abort = false;
+
+    int64_t t_end = esp_timer_get_time();
+    float elapsed_s = (float)(t_end - t_start) / 1000000.0f;
+
+    close(sock);
+    free(buf);
+
+    if (total_bytes == 0 || elapsed_s <= 0) {
+        print_fn("No data received\r\n");
+        return ESP_FAIL;
+    }
+
+    float kBs  = (float)total_bytes / elapsed_s / 1024.0f;
+    float mbps = (float)total_bytes * 8.0f / elapsed_s / 1000000.0f;
+
+    print_fn("\r\n%sResult: %lu bytes in %.1fs\r\n",
+             aborted ? "[Aborted] " : "",
+             (unsigned long)total_bytes, elapsed_s);
+    print_fn("Speed: %.2f Mbps (%.0f KB/s)\r\n", mbps, kBs);
+    return aborted ? ESP_ERR_TIMEOUT : ESP_OK;
+}
+
+void wireless_speed_test_abort(void)
+{
+    s_speed_abort = true;
 }
 
 /* ── Status / Info ─────────────────────────────────────────────── */

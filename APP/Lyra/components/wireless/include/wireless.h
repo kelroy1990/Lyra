@@ -83,6 +83,32 @@ esp_err_t wireless_wifi_get_ip(char *buf, size_t len);
  */
 esp_err_t wireless_ping(const char *host, int count, wireless_print_fn_t print_fn);
 
+/* ── Speed test ───────────────────────────────────────────────── */
+
+/**
+ * HTTP download speed test. Downloads a file and measures throughput.
+ * Uses plain HTTP (no TLS). If url is NULL, uses a default public file.
+ * @param url       HTTP URL (e.g. "http://192.168.1.10:8080/file.bin"), or NULL for default
+ * @param print_fn  Callback for progress and results
+ *
+ * Quick local test:
+ *   PC:   python -m http.server 8080      (serves current directory)
+ *   Lyra: wifi speed http://<PC_IP>:8080/bigfile.bin
+ */
+esp_err_t wireless_speed_test(const char *url, wireless_print_fn_t print_fn);
+
+/** Abort a running speed test (call from another task/context). */
+void wireless_speed_test_abort(void);
+
+/* ── Diagnostics ──────────────────────────────────────────────── */
+
+/**
+ * Run layer-by-layer network diagnostics. Blocks ~10-15s for ping/DNS tests.
+ * Tests: L2 WiFi, L3 IP/GW/netif, DHCP state, DNS servers,
+ *        ping gateway, ping 8.8.8.8, DNS resolve google.com.
+ */
+esp_err_t wireless_wifi_diag(wireless_print_fn_t print_fn);
+
 /* ── Status / Info ─────────────────────────────────────────────── */
 
 wireless_state_t wireless_get_state(void);
