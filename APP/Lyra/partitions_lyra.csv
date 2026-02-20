@@ -1,0 +1,20 @@
+# Lyra partition table — Flash 8 MB (W25Q64JVZPIQ, final board)
+# For dev board (32 MB GD25Q256EYIGR): slots can be extended, same logical layout.
+#
+# Layout:
+#   0x000000 - 0x008FFF  Bootloader (reserved by IDF, not in table)
+#   0x009000 - 0x00EFFF  NVS (system: WiFi credentials, etc.)
+#   0x00F000 - 0x010FFF  OTA data (which slot is active)
+#   0x011000 - 0x011FFF  PHY init data
+#   0x020000 - 0x2DFFFF  OTA slot 0 (app, 2.75 MB)
+#   0x2E0000 - 0x59FFFF  OTA slot 1 (app, 2.75 MB)
+#   0x5A0000 - 0x5DFFFF  lyra_cfg (user config: WiFi SSID/pass, EQ, API keys)
+#   0x5E0000 - 0x7FFFFF  (unallocated, 128 KB — reserved for future use)
+#
+# Name,   Type,  SubType,  Offset,    Size
+nvs,      data,  nvs,      0x9000,    0x6000
+otadata,  data,  ota,      0xF000,    0x2000
+phy_init, data,  phy,      0x11000,   0x1000
+ota_0,    app,   ota_0,    0x20000,   0x2C0000
+ota_1,    app,   ota_1,    0x2E0000,  0x2C0000
+lyra_cfg, data,  nvs,      0x5A0000,  0x40000

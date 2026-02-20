@@ -29,6 +29,7 @@
 #include "audio_codecs.h"
 #include "power.h"
 #include "wireless.h"
+#include "net_audio.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
@@ -823,6 +824,17 @@ static int sd_player_cb_get_source(void)
 }
 
 static void sd_player_cb_switch_source(int src, uint32_t sr, uint8_t bits)
+{
+    audio_source_switch((audio_source_t)src, sr, bits);
+}
+
+// net_audio uses the same callback wrappers as sd_player
+static int net_audio_cb_get_source(void)
+{
+    return (int)audio_source_get();
+}
+
+static void net_audio_cb_switch_source(int src, uint32_t sr, uint8_t bits)
 {
     audio_source_switch((audio_source_t)src, sr, bits);
 }
@@ -1721,6 +1733,68 @@ static void cdc_task(void *arg)
                         } else {
                             cdc_printf("Usage: ping <host|ip>\r\n");
                         }
+                    } else if (strncmp(rx_buf, "net ", 4) == 0) {
+                        const char *sub = rx_buf + 4;
+                        while (*sub == ' ') sub++;
+                        if (strncmp(sub, "play ", 5) == 0) {
+                            const char *url = sub + 5;
+                            while (*url == ' ') url++;
+                            if (*url) {
+                                // Optional referer: "net play <url> ref <referer_url>"
+                                static char url_buf[512];
+                                static char ref_buf[128];
+                                url_buf[0] = '\0';
+                                ref_buf[0] = '\0';
+                                const char *ref_kw = strstr(url, " ref ");
+                                if (ref_kw) {
+                                    size_t url_len = (size_t)(ref_kw - url);
+                                    if (url_len >= sizeof(url_buf)) url_len = sizeof(url_buf) - 1;
+                                    memcpy(url_buf, url, url_len);
+                                    url_buf[url_len] = '\0';
+                                    strncpy(ref_buf, ref_kw + 5, sizeof(ref_buf) - 1);
+                                } else {
+                                    strncpy(url_buf, url, sizeof(url_buf) - 1);
+                                }
+                                esp_err_t e = net_audio_cmd_start(url_buf, NULL,
+                                                                   ref_buf[0] ? ref_buf : NULL);
+                                cdc_printf(e == ESP_OK ? "NET: starting stream\r\n"
+                                                       : "NET: queue full\r\n");
+                            } else {
+                                cdc_printf("Usage: net play <url> [ref <referer>]\r\n");
+                            }
+                        } else if (strcmp(sub, "stop") == 0) {
+                            net_audio_cmd_stop();
+                            cdc_printf("NET: stopped\r\n");
+                        } else if (strcmp(sub, "pause") == 0) {
+                            net_audio_cmd_pause();
+                            cdc_printf("NET: paused\r\n");
+                        } else if (strcmp(sub, "resume") == 0) {
+                            net_audio_cmd_resume();
+                            cdc_printf("NET: resumed\r\n");
+                        } else if (strcmp(sub, "status") == 0) {
+                            const char *state_names[] = {
+                                "idle", "connecting", "buffering", "playing", "paused", "error"
+                            };
+                            net_audio_state_t st = net_audio_get_state();
+                            cdc_printf("NET state: %s\r\n",
+                                       (st < 6) ? state_names[st] : "?");
+                            if (net_audio_is_active()) {
+                                net_audio_info_t info = net_audio_get_info();
+                                cdc_printf("  codec:   %s\r\n", info.codec[0] ? info.codec : "?");
+                                cdc_printf("  format:  %luHz %d-bit %dch\r\n",
+                                           (unsigned long)info.sample_rate,
+                                           info.bits_per_sample, info.channels);
+                                cdc_printf("  elapsed: %lu:%02lu\r\n",
+                                           info.elapsed_ms / 60000,
+                                           (info.elapsed_ms / 1000) % 60);
+                                if (info.icy_title[0])
+                                    cdc_printf("  title:   %s\r\n", info.icy_title);
+                                cdc_printf("  url:     %s\r\n", info.url);
+                            }
+                        } else {
+                            cdc_printf("Commands: net play <url>, net stop, net pause, "
+                                       "net resume, net status\r\n");
+                        }
                     } else {
                         cdc_printf("Unknown command. Type 'help'\r\n");
                     }
@@ -1892,5 +1966,19 @@ void app_main(void)
     sd_player_init(cdc_printf, &sd_audio_cbs);
     sd_player_start_task();
 
-    ESP_LOGI(TAG, "Lyra ready - USB Audio 2.0 + SD Player -> ES8311 DAC");
+    // 8. Net Audio (F8-A) — HTTP streaming engine
+    static const net_audio_audio_cbs_t net_audio_cbs = {
+        .get_source           = net_audio_cb_get_source,
+        .switch_source        = net_audio_cb_switch_source,
+        .set_producer_handle  = audio_source_set_producer_handle,
+        .get_stream_buffer    = audio_get_stream_buffer,
+        .process_audio        = audio_pipeline_process,
+        .audio_source_none    = (int)AUDIO_SOURCE_NONE,
+        .audio_source_net     = (int)AUDIO_SOURCE_NET,
+        .register_source_cbs  = audio_source_register_net_cbs,
+    };
+    net_audio_init(&net_audio_cbs);
+    net_audio_start_task();
+
+    ESP_LOGI(TAG, "Lyra ready - USB Audio 2.0 + SD Player + NET Audio -> ES8311 DAC");
 }

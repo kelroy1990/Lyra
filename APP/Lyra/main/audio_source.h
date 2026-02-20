@@ -14,6 +14,7 @@ typedef enum {
     AUDIO_SOURCE_NONE,   // No active producer (transition state)
     AUDIO_SOURCE_USB,    // USB UAC2 → audio_task produces
     AUDIO_SOURCE_SD,     // SD card → sd_player_task produces
+    AUDIO_SOURCE_NET,    // Network → net_audio_task produces  [F8-A]
 } audio_source_t;
 
 //--------------------------------------------------------------------+
@@ -22,6 +23,15 @@ typedef enum {
 
 // Initialize audio source manager (call once at startup)
 void audio_source_init(void);
+
+// Register optional callbacks invoked when leaving / entering NET source.
+// Called by net_audio_init() to avoid circular dependency.
+// pause_cb: invoked just before switching away from NET (keep socket open).
+// resume_cb: invoked just after switching back to NET.
+typedef void (*audio_source_net_pause_cb_t)(void);
+typedef void (*audio_source_net_resume_cb_t)(void);
+void audio_source_register_net_cbs(audio_source_net_pause_cb_t pause_cb,
+                                    audio_source_net_resume_cb_t resume_cb);
 
 // Get current audio source
 audio_source_t audio_source_get(void);

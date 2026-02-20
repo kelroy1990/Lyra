@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "metadata.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_REQUIRES
+        esp_http_client
+        nvs_flash
+        log
+        freertos
+        json
+        esp_timer
+)

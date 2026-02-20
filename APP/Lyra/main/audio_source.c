@@ -11,6 +11,17 @@ static volatile TaskHandle_t s_active_producer = NULL;
 static uint32_t s_usb_sample_rate = 0;
 static uint8_t  s_usb_bits_per_sample = 0;
 
+// Optional NET pause/resume callbacks (registered by net_audio)
+static audio_source_net_pause_cb_t  s_net_pause_cb  = NULL;
+static audio_source_net_resume_cb_t s_net_resume_cb = NULL;
+
+void audio_source_register_net_cbs(audio_source_net_pause_cb_t pause_cb,
+                                    audio_source_net_resume_cb_t resume_cb)
+{
+    s_net_pause_cb  = pause_cb;
+    s_net_resume_cb = resume_cb;
+}
+
 void audio_source_init(void)
 {
     s_current_source = AUDIO_SOURCE_NONE;
@@ -27,7 +38,7 @@ void audio_source_switch(audio_source_t new_source,
                          uint8_t new_bits_per_sample)
 {
     audio_source_t old = s_current_source;
-    const char *names[] = { "NONE", "USB", "SD" };
+    const char *names[] = { "NONE", "USB", "SD", "NET" };
 
     // Same source — only reconfigure I2S if format actually changed
     if (old == new_source) {
@@ -54,6 +65,11 @@ void audio_source_switch(audio_source_t new_source,
     }
 
     ESP_LOGI(TAG, "Switching audio source: %s -> %s", names[old], names[new_source]);
+
+    // When leaving NET: signal net_audio to pause consumption (keep socket open)
+    if (old == AUDIO_SOURCE_NET && s_net_pause_cb) {
+        s_net_pause_cb();
+    }
 
     // When leaving USB, save current I2S format (so we can restore when returning)
     // Note: new_sample_rate here is the SD file's rate, NOT the USB rate.
@@ -99,6 +115,11 @@ void audio_source_switch(audio_source_t new_source,
     // Step 5: Activate new source
     s_current_source = new_source;
     ESP_LOGI(TAG, "Audio source active: %s", names[new_source]);
+
+    // When entering NET: signal net_audio to resume consumption
+    if (new_source == AUDIO_SOURCE_NET && s_net_resume_cb) {
+        s_net_resume_cb();
+    }
 }
 
 void audio_source_set_producer_handle(TaskHandle_t handle)
