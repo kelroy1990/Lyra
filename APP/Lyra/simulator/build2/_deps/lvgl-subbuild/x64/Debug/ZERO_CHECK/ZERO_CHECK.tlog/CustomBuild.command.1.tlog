@@ -1,0 +1,10 @@
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKEFILES\13CA361FB2DFC6DD04520D770BBA8C4F\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SD:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild" "-BD:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild" --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/lvgl-populate.slnx"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

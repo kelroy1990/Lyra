@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\CMakeFiles\54897fe14e437d643405157d0e0dcf92\INSTALL_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{0D4A0BE1-D8BF-3A95-96A2-EB3776535F5C}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

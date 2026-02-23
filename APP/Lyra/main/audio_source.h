@@ -33,6 +33,11 @@ typedef void (*audio_source_net_resume_cb_t)(void);
 void audio_source_register_net_cbs(audio_source_net_pause_cb_t pause_cb,
                                     audio_source_net_resume_cb_t resume_cb);
 
+// Register optional DAC mute callback for click-free transitions.
+// Called with (true) before source switch and (false) after.
+typedef void (*audio_source_dac_mute_cb_t)(bool mute);
+void audio_source_register_dac_mute_cb(audio_source_dac_mute_cb_t cb);
+
 // Get current audio source
 audio_source_t audio_source_get(void);
 

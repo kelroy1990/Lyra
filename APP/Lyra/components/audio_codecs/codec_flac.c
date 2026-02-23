@@ -6,8 +6,102 @@
 #include "audio_codecs_internal.h"
 #include "dr_flac.h"
 #include <esp_log.h>
+#include <stdlib.h>
+#include <string.h>
 
 static const char *TAG = "codec_flac";
+
+//--------------------------------------------------------------------+
+// ReplayGain pre-scan: find REPLAYGAIN_TRACK_GAIN in VORBIS_COMMENT
+//
+// Called before drflac_open().  Reads FLAC metadata blocks looking for
+// block type 4 (VORBIS_COMMENT).  Rewinds to offset 0 before returning.
+// Returns gain in dB (0.0 if no tag found).
+//--------------------------------------------------------------------+
+
+static float flac_read_replaygain(FILE *f)
+{
+    float gain = 0.0f;
+
+    fseek(f, 0, SEEK_SET);
+
+    /* Verify fLaC marker */
+    uint8_t marker[4];
+    if (fread(marker, 1, 4, f) != 4 || memcmp(marker, "fLaC", 4) != 0)
+        goto done;
+
+    for (;;) {
+        /* 4-byte metadata block header:
+         *   [0]     bit7 = last_metadata_block flag, [6:0] = block_type
+         *   [1..3]  block_length (24-bit BE, does NOT include the 4-byte header)
+         */
+        uint8_t hdr[4];
+        if (fread(hdr, 1, 4, f) != 4) break;
+
+        bool     last_block = (hdr[0] & 0x80) != 0;
+        uint8_t  btype      =  hdr[0] & 0x7F;
+        uint32_t blen       = ((uint32_t)hdr[1] << 16)
+                            | ((uint32_t)hdr[2] <<  8)
+                            |  (uint32_t)hdr[3];
+
+        if (btype == 4) { /* VORBIS_COMMENT */
+            /*
+             * Vorbis comment content (all lengths are little-endian):
+             *   4 bytes LE: vendor string length (n)
+             *   n bytes:    vendor string
+             *   4 bytes LE: comment count
+             *   for each:   4 bytes LE length + "KEY=VALUE" UTF-8 string
+             *
+             * REPLAYGAIN_TRACK_GAIN=+x.xx dB  (or negative, no space before dB)
+             */
+            uint8_t *blk = malloc(blen);
+            if (!blk) break;
+            if (fread(blk, 1, blen, f) != blen) { free(blk); break; }
+
+            const uint8_t *p   = blk;
+            const uint8_t *end = blk + blen;
+
+            /* Skip vendor string */
+            if (p + 4 > end) { free(blk); break; }
+            uint32_t vlen = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+                          | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+            p += 4;
+            if (p + vlen <= end) p += vlen; else { free(blk); break; }
+
+            /* Comment count */
+            if (p + 4 > end) { free(blk); break; }
+            uint32_t nc = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+                        | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+            p += 4;
+
+            for (uint32_t i = 0; i < nc && p + 4 <= end; i++) {
+                uint32_t clen = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+                              | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+                p += 4;
+                if (clen > (uint32_t)(end - p)) break;
+
+                /* "REPLAYGAIN_TRACK_GAIN=" is 22 characters */
+                if (clen >= 22 &&
+                    strncasecmp((const char *)p, "REPLAYGAIN_TRACK_GAIN=", 22) == 0) {
+                    gain = strtof((const char *)p + 22, NULL);
+                }
+                p += clen;
+            }
+            free(blk);
+            /* VORBIS_COMMENT is unique per file — stop scanning */
+            break;
+        } else {
+            /* Skip this block */
+            fseek(f, (long)blen, SEEK_CUR);
+        }
+
+        if (last_block) break;
+    }
+
+done:
+    fseek(f, 0, SEEK_SET);
+    return gain;
+}
 
 //--------------------------------------------------------------------+
 // dr_flac I/O callbacks (read/seek/tell via FILE*)
@@ -100,27 +194,32 @@ static const codec_vtable_t flac_vtable = {
 };
 
 //--------------------------------------------------------------------+
-// FLAC open: init dr_flac with custom I/O
+// FLAC open: pre-scan for ReplayGain, then init dr_flac with custom I/O
 //--------------------------------------------------------------------+
 
 bool codec_flac_open(codec_handle_t *h)
 {
+    /* Pre-scan metadata blocks for REPLAYGAIN_TRACK_GAIN before dr_flac
+     * takes ownership of the read position.  The scan rewinds to 0. */
+    float gain_db = flac_read_replaygain(h->file);
+
     drflac *flac = drflac_open(flac_read_cb, flac_seek_cb, flac_tell_cb, h->file, NULL);
     if (!flac) {
         ESP_LOGE(TAG, "drflac_open failed");
         return false;
     }
 
-    h->flac.drflac = flac;
-    h->info.sample_rate = flac->sampleRate;
+    h->flac.drflac          = flac;
+    h->info.sample_rate     = flac->sampleRate;
     h->info.bits_per_sample = flac->bitsPerSample;
-    h->info.channels = flac->channels;
-    h->info.total_frames = flac->totalPCMFrameCount;
+    h->info.channels        = flac->channels;
+    h->info.total_frames    = flac->totalPCMFrameCount;
+    h->info.gain_db         = gain_db;
     h->vt = &flac_vtable;
 
-    ESP_LOGI(TAG, "FLAC: %luHz %d-bit %dch, %llu frames",
+    ESP_LOGI(TAG, "FLAC: %luHz %d-bit %dch, %llu frames, gain=%.2f dB",
              h->info.sample_rate, h->info.bits_per_sample,
-             h->info.channels, h->info.total_frames);
+             h->info.channels, h->info.total_frames, gain_db);
 
     return true;
 }

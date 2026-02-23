@@ -1,0 +1,44 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeFiles\639f4f749431036fea3561031231ab59\lvgl-populate-mkdir.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeFiles\639f4f749431036fea3561031231ab59\lvgl-populate-download.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeFiles\639f4f749431036fea3561031231ab59\lvgl-populate-update.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeFiles\639f4f749431036fea3561031231ab59\lvgl-populate-patch.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeFiles\639f4f749431036fea3561031231ab59\lvgl-populate-configure.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeFiles\639f4f749431036fea3561031231ab59\lvgl-populate-build.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeFiles\639f4f749431036fea3561031231ab59\lvgl-populate-install.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeFiles\639f4f749431036fea3561031231ab59\lvgl-populate-test.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeFiles\eab913651b78f7cfe417c0029e26aa23\lvgl-populate-complete.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeFiles\13ca361fb2dfc6dd04520d770bba8c4f\lvgl-populate.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeFiles\lvgl-populate" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{344BF2BF-E515-3383-AF5E-38DA8E3AEC76}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

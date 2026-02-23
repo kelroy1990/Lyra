@@ -15,11 +15,19 @@ static uint8_t  s_usb_bits_per_sample = 0;
 static audio_source_net_pause_cb_t  s_net_pause_cb  = NULL;
 static audio_source_net_resume_cb_t s_net_resume_cb = NULL;
 
+// Optional DAC mute callback for click-free transitions
+static audio_source_dac_mute_cb_t s_dac_mute_cb = NULL;
+
 void audio_source_register_net_cbs(audio_source_net_pause_cb_t pause_cb,
                                     audio_source_net_resume_cb_t resume_cb)
 {
     s_net_pause_cb  = pause_cb;
     s_net_resume_cb = resume_cb;
+}
+
+void audio_source_register_dac_mute_cb(audio_source_dac_mute_cb_t cb)
+{
+    s_dac_mute_cb = cb;
 }
 
 void audio_source_init(void)
@@ -49,6 +57,7 @@ void audio_source_switch(audio_source_t new_source,
             if (cur_rate != new_sample_rate || cur_bits != new_bits_per_sample) {
                 ESP_LOGI(TAG, "Reconfig I2S (same source %s): %lu→%lu Hz, %d→%d bit",
                          names[old], cur_rate, new_sample_rate, cur_bits, new_bits_per_sample);
+                if (s_dac_mute_cb) s_dac_mute_cb(true);
                 audio_set_reconfiguring(true);
                 while (audio_is_feeder_writing()) vTaskDelay(1);
                 StreamBufferHandle_t stream = audio_get_stream_buffer();
@@ -57,6 +66,7 @@ void audio_source_switch(audio_source_t new_source,
                 if (actual_rate == 0) actual_rate = new_sample_rate;  // safety
                 audio_pipeline_update_format(actual_rate, new_bits_per_sample);
                 audio_set_reconfiguring(false);
+                if (s_dac_mute_cb) s_dac_mute_cb(false);
                 ESP_LOGI(TAG, "Reconfig done: requested=%lu actual=%lu Hz",
                          new_sample_rate, actual_rate);
             }
@@ -65,6 +75,9 @@ void audio_source_switch(audio_source_t new_source,
     }
 
     ESP_LOGI(TAG, "Switching audio source: %s -> %s", names[old], names[new_source]);
+
+    // Hardware mute DAC before transition — prevents clicks from stale DMA data
+    if (s_dac_mute_cb) s_dac_mute_cb(true);
 
     // When leaving NET: signal net_audio to pause consumption (keep socket open)
     if (old == AUDIO_SOURCE_NET && s_net_pause_cb) {
@@ -120,6 +133,9 @@ void audio_source_switch(audio_source_t new_source,
     if (new_source == AUDIO_SOURCE_NET && s_net_resume_cb) {
         s_net_resume_cb();
     }
+
+    // Hardware unmute DAC after transition is complete
+    if (s_dac_mute_cb) s_dac_mute_cb(false);
 }
 
 void audio_source_set_producer_handle(TaskHandle_t handle)

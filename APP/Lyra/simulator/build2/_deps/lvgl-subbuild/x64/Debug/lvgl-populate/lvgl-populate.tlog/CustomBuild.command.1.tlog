@@ -1,0 +1,150 @@
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKEFILES\639F4F749431036FEA3561031231AB59\LVGL-POPULATE-MKDIR.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -Dcfgdir=/Debug -P "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/lvgl-populate-prefix/tmp/lvgl-populate-mkdirs.cmake"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/lvgl-populate-prefix/src/lvgl-populate-stamp/Debug/lvgl-populate-mkdir"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKEFILES\639F4F749431036FEA3561031231AB59\LVGL-POPULATE-DOWNLOAD.RULE
+setlocal
+cd "D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps"
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE -P "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/lvgl-populate-prefix/tmp/lvgl-populate-gitclone.cmake"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/lvgl-populate-prefix/src/lvgl-populate-stamp/Debug/lvgl-populate-download"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKEFILES\639F4F749431036FEA3561031231AB59\LVGL-POPULATE-UPDATE.RULE
+setlocal
+cd "D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-src"
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -Dcan_fetch=YES -DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE -P "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/lvgl-populate-prefix/tmp/lvgl-populate-gitupdate.cmake"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKEFILES\639F4F749431036FEA3561031231AB59\LVGL-POPULATE-PATCH.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/lvgl-populate-prefix/src/lvgl-populate-stamp/Debug/lvgl-populate-patch"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKEFILES\639F4F749431036FEA3561031231AB59\LVGL-POPULATE-CONFIGURE.RULE
+setlocal
+cd "D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-build"
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/lvgl-populate-prefix/src/lvgl-populate-stamp/Debug/lvgl-populate-configure"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKEFILES\639F4F749431036FEA3561031231AB59\LVGL-POPULATE-BUILD.RULE
+setlocal
+cd "D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-build"
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/lvgl-populate-prefix/src/lvgl-populate-stamp/Debug/lvgl-populate-build"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKEFILES\639F4F749431036FEA3561031231AB59\LVGL-POPULATE-INSTALL.RULE
+setlocal
+cd "D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-build"
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/lvgl-populate-prefix/src/lvgl-populate-stamp/Debug/lvgl-populate-install"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKEFILES\639F4F749431036FEA3561031231AB59\LVGL-POPULATE-TEST.RULE
+setlocal
+cd "D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-build"
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/lvgl-populate-prefix/src/lvgl-populate-stamp/Debug/lvgl-populate-test"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKEFILES\EAB913651B78F7CFE417C0029E26AA23\LVGL-POPULATE-COMPLETE.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -E make_directory "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/CMakeFiles/Debug"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/CMakeFiles/Debug/lvgl-populate-complete"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/lvgl-populate-prefix/src/lvgl-populate-stamp/Debug/lvgl-populate-done"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKEFILES\13CA361FB2DFC6DD04520D770BBA8C4F\LVGL-POPULATE.RULE
+setlocal
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SD:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild" "-BD:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild" --check-stamp-file "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/CMakeFiles/generate.stamp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

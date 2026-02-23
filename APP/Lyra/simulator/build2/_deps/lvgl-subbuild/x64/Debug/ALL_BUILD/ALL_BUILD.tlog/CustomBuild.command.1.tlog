@@ -1,0 +1,10 @@
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\_DEPS\LVGL-SUBBUILD\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SD:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild" "-BD:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild" --check-stamp-file "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/_deps/lvgl-subbuild/CMakeFiles/generate.stamp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

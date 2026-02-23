@@ -1,569 +1,328 @@
 # TODO - Lyra Project
 
-> **Última actualización:** 2026-02-17
-> **Estado actual:** Core de audio completo (USB + SD + DSP + I2S). Faltan capas de interacción.
+> **Última actualización:** 2026-02-23
+> **Estado actual:** Audio pipeline completo (USB + SD + NET + DSP + I2S), 9 formatos soportados, WiFi operativo, Spotify en integración. Falta UI y hardware final.
 
 ---
 
-## 📋 Estado General del Proyecto
+## Estado General del Proyecto
 
-### ✅ Fases Completadas
+### Fases Completadas
 
 - **F0**: Estructura del proyecto
 - **F0.5**: USB Audio (UAC2 + CDC)
 - **F1**: I2S output (temporal con ES8311, objetivo ES9039Q2M)
-- **F1.5**: MSC (USB Mass Storage) — **READ ~15 MB/s, WRITE ~7.2 MB/s** (double-buffer ping-pong, DMA 64B align)
-- **F3**: DSP Pipeline con EQ
-- **F3.1**: **Audio Pipeline decoupled architecture** — space-check, zero overflow
-- **F3.2**: **Fix coeficientes biquad** — eliminado path pre-calculado con error 2x
+- **F1.5**: MSC (USB Mass Storage) — **READ ~13.5 MB/s, WRITE ~8.7 MB/s** (SDR50 100MHz UHS-I, double-buffer ping-pong)
+- **F3**: DSP Pipeline con EQ (biquad IIR, FPU optimized, budget management)
+- **F3.1**: Audio Pipeline decoupled architecture — space-check, zero overflow
+- **F3.2**: Fix coeficientes biquad — eliminado path pre-calculado con error 2x
 - **F6**: Reproducción microSD — WAV/FLAC/MP3, playlist, CUE parser, audio_source manager
-- **F6.1**: **I2S reconfig entre pistas SD** — same-source format change + fallback rate propagation
-- **F6.2**: **SD throughput** — setvbuf 32KB, decode block 1024 frames, SD CRC safety check
-- **F6.3**: **CUE sheet parser** — implementado (sin testear, falta .cue de prueba)
+- **F6.1**: I2S reconfig entre pistas SD — same-source format change + fallback rate propagation
+- **F6.2**: SD throughput — setvbuf 32KB, decode block 1024 frames, SD CRC safety check
+- **F6.3**: CUE sheet parser — implementado (sin testear, falta .cue de prueba)
+- **F6.4**: **Codecs completos** — AAC (ADTS + M4A), ALAC, Opus (seek + R128 gain), DSD (DSF + DFF/DSDIFF), FLAC ReplayGain
+- **F7-A**: **WiFi operativo** — esp_hosted SDIO + ESP32-C6 companion (dev board)
+- **F8-A**: **HTTP streaming** — MP3/FLAC/WAV/AAC/Ogg, ICY metadata, HTTPS, Referer
 
-### 🔄 Próximas Fases
+### En Progreso
 
-- **F2**: Display & UI base (LVGL + MIPI DSI) ← **PRÓXIMO (hardware)**
+- **F9-A**: **Spotify Connect** — cspot integration (en branch, parcialmente funcional)
+
+### Próximas Fases
+
+- **F2**: Display & UI base (LVGL + MIPI DSI) ← **PRÓXIMO**
+  - Simulador Python para desarrollo sin hardware
+  - Pantalla 720×1280 portrait (5")
 - **F3.5**: DSP Features avanzadas (EQ paramétrico 5 bandas, crossfeed, loudness)
 - **F4**: Gestión de energía (MAX77972, BMA400)
 - **F5**: Controles físicos (botones GPIO)
-- **F7**: Wireless ESP32-C5 (BT5 + WiFi6)
-- **F8**: UI avanzada
+- **F7-B**: ESP32-C5 wireless (placa final, WiFi 5/6 + BT5)
+- **F8-B**: UI avanzada (album art, navegador, config)
 - **HW**: Migración a ES9039Q2M (placa final)
 
 ---
 
-## 🎯 Fase F3 - DSP Pipeline (COMPLETADA)
+## Formatos de Audio Soportados
 
-### ✅ Lo que se implementó hoy
+### SD Card Playback
 
-#### **1. Arquitectura DSP completa**
-- Pipeline: `USB → DSP Chain → I2S`
-- Frame-by-frame processing para latencia mínima
-- In-place buffer modification (sin copias)
+| Formato | Contenedor | Codec | Seek | ReplayGain | Extensiones |
+|---------|-----------|-------|------|------------|-------------|
+| WAV | WAV/AIFF | PCM/float/ADPCM | Exacto | — | .wav .aiff |
+| FLAC | FLAC nativo | FLAC | Exacto | Vorbis Comment | .flac |
+| MP3 | MP3 | MP3 (minimp3) | Aproximado | — | .mp3 |
+| AAC | ADTS | AAC-LC / HE-AAC | Aproximado | — | .aac |
+| AAC | M4A (ISO BMFF) | AAC-LC / HE-AAC | Exacto (sample table) | — | .m4a .m4b |
+| ALAC | M4A (ISO BMFF) | Apple Lossless | Exacto (sample table) | — | .m4a .m4b |
+| Opus | Ogg | Opus | Aproximado (interpolación) | R128_TRACK_GAIN | .opus |
+| DSF | DSF (Sony) | DSD→DoP | Lineal | — | .dsf |
+| DFF | DSDIFF (Philips) | DSD→DoP | Lineal | — | .dff |
 
-#### **2. Componentes implementados**
+### HTTP Streaming (net_audio)
 
-```
-components/audio_pipeline/
-├── include/
-│   ├── audio_pipeline.h        ✅ API pública
-│   ├── dsp_types.h            ✅ Tipos comunes
-│   ├── dsp_chain.h            ✅ Chain manager + budget API
-│   ├── dsp_biquad.h           ✅ Biquad IIR filters
-│   └── dsp_presets.h          ✅ Presets + coeffs pre-calc
-├── audio_pipeline.c           ✅ Integration layer
-├── dsp_chain.c                ✅ DSP chain + budget mgmt
-├── dsp_biquad.c               ✅ Biquad + ILP optimization
-├── dsp_presets.c              ✅ 7 presets + coeffs @ 48kHz
-└── CMakeLists.txt             ✅
-```
+| Formato | Detección | Notas |
+|---------|-----------|-------|
+| MP3 | Content-Type / codec_hint | ICY metadata (StreamTitle) |
+| FLAC | Content-Type / codec_hint | |
+| WAV | Content-Type / codec_hint | |
+| AAC | Content-Type / codec_hint | ADTS streams |
+| Ogg | Content-Type / codec_hint | Vorbis/Opus |
 
-#### **3. Optimizaciones aplicadas**
+### USB Audio (UAC2)
 
-1. **Debug logging condicional** (`#ifdef DSP_DEBUG_LOGGING`)
-   - Producción: 0% overhead
-   - Debug: Logging cada 1000 frames
-   - Compilar con: `idf.py -D CMAKE_C_FLAGS="-DDSP_DEBUG_LOGGING" build`
-
-2. **Soft limiter (tanh)**
-   - Threshold: 95%
-   - Evita clipping audible con boost extremo
-   - +10 cycles pero mejora calidad perceptual
-
-3. **Cálculo dinámico de coeficientes**
-   - Recálculo automático al cambiar sample rate
-   - RBJ Audio EQ Cookbook (normalizado por a0)
-   - Coste: ~230 cycles por filtro solo al cambiar preset/formato (no en hot path)
-
-4. **ILP optimization (Instruction-Level Parallelism)**
-   - Reorganización de código para FPU pipeline
-   - L/R channels procesados independientemente
-   - **40% speedup** en biquad processing (30 → 18 cycles)
-
-5. **Loop unrolling + compiler hints**
-   - Fast path para single-filter presets (caso común)
-   - `__attribute__((hot, always_inline))`
-   - `restrict` pointers para alias analysis
-
-#### **4. Budget Management API**
-
-Implementada API completa para validación dinámica:
-
-```c
-// Obtener info de budget actual
-dsp_budget_t budget;
-dsp_chain_get_budget(&dsp, &budget);
-
-// Validar antes de añadir filtros
-if (dsp_chain_can_add_filters(&dsp, 5)) {
-    // OK, hay budget
-}
-
-// Límite para sample rate específico
-uint8_t max = dsp_chain_get_max_filters_for_rate(384000);  // → 25
-
-// Validar preset antes de cargar
-if (dsp_chain_validate_preset(&dsp, PRESET_ROCK)) {
-    load_preset(PRESET_ROCK);
-}
-```
-
-Ver `DSP_BUDGET_GUIDE.md` para ejemplos completos de integración UI.
-
-#### **5. Performance verificado**
-
-| Sample Rate | CPU @ 1 filtro | Max Filtros Safe | Notas |
-|-------------|----------------|------------------|-------|
-| 48 kHz      | 0.62%          | 30*              | Limitado por UI |
-| 96 kHz      | 1.15%          | 30*              | Limitado por UI |
-| 192 kHz     | 2.30%          | 30*              | Limitado por UI |
-| 384 kHz     | 4.99%          | 25               | Limitado por CPU |
-
-*Hardware permite más, pero 30 es suficiente para cualquier caso de uso.
-
-#### **6. Presets implementados**
-
-Acceso via CDC (puerto COM/ttyUSB):
-- `flat` - Bypass
-- `rock` - +12dB @ 100Hz (EXTREME, para testing)
-- `jazz` - 3 filtros (smooth)
-- `classical` - 3 filtros (V-shape)
-- `headphone` - Flat + crossfeed (TODO)
-- `bass` - +8dB @ 80Hz
-- `test` - +20dB @ 1kHz (verificación extrema)
-- `on` / `off` - Enable/disable DSP
-- `status` - Info actual
-
-#### **7. Decisiones de diseño confirmadas**
-
-✅ **Opción A: Bloquear y que usuario decida**
-- NO auto-reducir sample rate si excede límite
-- Mostrar error claro y opciones al usuario
-- Dejar que usuario tome decisión informada
-
-✅ **Límites establecidos:**
-- `DSP_MAX_BIQUADS = 10` (hardware, en cadena)
-- `DSP_MAX_USER_FILTERS = 30` (UI limit)
-- `DSP_SAFETY_MARGIN = 0.85f` (85% CPU max, 15% headroom)
+| Parámetro | Valor |
+|-----------|-------|
+| Sample rates | 44.1k – 384 kHz |
+| Bit depth | 16/24/32-bit |
+| Canales | Stereo |
+| Modo | Asíncrono (feedback EP) |
+| DSD | DoP automático (DAC detecta markers) |
 
 ---
 
-## 🔴 TODOs Pendientes - Fase F3.5 (DSP Features Avanzadas)
+## Detalles por Fase
 
-### **Prioridad ALTA**
+### F6.4 — Codecs Completos (COMPLETADA)
+
+**M4A Demuxer** (`m4a_demuxer.c/.h`):
+- Parser ISO BMFF completo: moov → trak → mdia → stbl
+- Reconstruye tabla de samples plana (offsets + sizes) desde stsc/stsz/stco/co64
+- Detecta codec por stsd box: `mp4a` → AAC, `alac` → ALAC
+- Extrae AudioSpecificConfig (AAC) o ALACSpecificConfig (magic cookie)
+- Memoria: ~12 bytes/frame en PSRAM (1h ALAC 48kHz ≈ 500 KB)
+
+**ALAC** (`codec_alac.cpp`):
+- Apple ALACDecoder C++ (del repositorio cspot/bell/external/alac/codec)
+- Decodifica 16/24/32-bit Apple Lossless
+- Seek exacto por sample table index
+- `extern "C"` wrapper para integración con dispatcher C
+
+**AAC-M4A** (`codec_aac.c` extendido):
+- Reutiliza opencore-aacdec existente
+- Frames raw (sin ADTS header) por sample table
+- AudioSpecificConfig via `PVMP4AudioDecoderConfig()`
+- Seek exacto por sample table index
+
+**DFF/DSDIFF** (`codec_dsd.c` extendido):
+- Parser big-endian IFF (FRM8 → DSD/PROP/DST chunks)
+- Interleaved L0,R0,L1,R1 → DoP packing con markers 0x05/0xFA
+- Seek lineal: `data_offset + frame_pos * 4`
+
+**Opus seek + R128** (`codec_opus.c` extendido):
+- Seek aproximado: interpolación lineal por file_size + forward Ogg scan
+- Duración total: scan últimos 64KB → last page granule position
+- R128_TRACK_GAIN: parse OpusTags Vorbis comment, int16 Q7.8 → float dB
+
+**FLAC ReplayGain** (`codec_flac.c` extendido):
+- Pre-scan de metadata blocks antes de `drflac_open()`
+- Lee tipo 4 (VORBIS_COMMENT), busca `REPLAYGAIN_TRACK_GAIN=`
+- `strtof()` para valor dB, rewind antes de abrir decoder
+
+**ReplayGain aplicación** (`sd_player.c`):
+- `gain_db` en `codec_info_t` (0.0 = sin ajuste)
+- Conversión a Q16: `powf(10, gain_db/20) * 65536`
+- Aplicación int64 con saturación INT32_MAX/MIN antes de DSP chain
+- Cache estático: solo recalcula cuando cambia gain_db
+
+### F7-A — WiFi Operativo (COMPLETADA)
+
+**Hardware dev board:** ESP32-C6-MINI-1 via SDIO (esp_hosted)
+**Hardware placa final:** ESP32-C5-WROOM-1U-N8R8
+
+- esp_hosted SDIO slave: DAT0-3=GPIO14-17, CLK=18, CMD=19
+- Reset GPIO=54, Boot GPIO=53 (final only)
+- DHCP funcional con `CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP=y`
+- TCP window: 32KB max (DRAM constraint)
+- DNS: lwip_getaddrinfo() + manual DNS1 fallback
+- Conexión via CDC: `wifi connect <SSID> <PASS>`
+
+### F8-A — HTTP Streaming (COMPLETADA)
+
+**Componente:** `components/net_audio/`
+
+- HTTP/HTTPS streaming con esp_http_client
+- Codecs: MP3, FLAC, WAV, AAC, Ogg (autodetect por Content-Type o hint)
+- ICY metadata: parsea StreamTitle de internet radio
+- Referer header configurable (anti-hotlink para Radio France, BBC, etc.)
+- Pre-buffering antes de reproducción
+- Pause/resume sin cerrar conexión HTTP
+- Audio source manager: conmutación USB ↔ SD ↔ NET
+- DAC mute callback para transiciones click-free
+- Comandos CDC: `radio <url>`, `radio stop`
+
+---
+
+## TODOs Pendientes
+
+### Prioridad ALTA — F2 (Display & UI)
+
+- [ ] **Simulador Python** para desarrollo UI sin hardware
+  - Framework: pygame/SDL o tkinter con canvas 720×1280
+  - Renderizar elementos C (botones, listas, waveforms) con datos mock
+  - Hot-reload de cambios
+- [ ] **LVGL integration** (cuando llegue hardware)
+  - MIPI DSI driver para panel 5" 720×1280
+  - Touch I2C driver
+  - Pantalla Now Playing (título, artista, formato, sample rate, progress bar)
+  - Navegador de archivos SD
+  - Selector de EQ / presets DSP
+
+### Prioridad ALTA — F3.5 (DSP Features)
 
 - [ ] **EQ Paramétrico de 5 bandas (usuario configurable)**
-  - 5 filtros biquad independientes controlables desde UI
-  - Cada banda: frecuencia (20Hz-20kHz), ganancia (-12/+12 dB), Q (0.1-10)
-  - Tipos por banda: Low Shelf, Peaking (×3), High Shelf
+  - 5 filtros biquad: Low Shelf, 3× Peaking, High Shelf
   - Frecuencias default: 60Hz, 230Hz, 1kHz, 3.5kHz, 12kHz
-  - Recálculo dinámico de coeficientes al cambiar parámetros
+  - Ganancia: -12/+12 dB, Q: 0.1-10
   - Coste: 5 × 18 = 90 cycles (trivial incluso @ 384kHz)
-  - Archivos: reutilizar `biquad_init()` existente, añadir API de control
-  - UI: 5 sliders verticales con labels de frecuencia + visualización curva
 
-- [ ] **Implementar Crossfeed** para mejorar imagen estéreo en auriculares
-  - Algoritmo: Chu Moy (simple) o Jan Meier (natural)
-  - Mezcla controlada de canal opuesto con delay + filtro paso bajo
+- [ ] **Crossfeed** para auriculares
+  - Algoritmo: Chu Moy o Jan Meier
   - Parámetro: intensidad (0-100%, default ~30%)
-  - Coste estimado: ~100 cycles
-  - Archivos: `dsp_crossfeed.h`, `dsp_crossfeed.c`
-  - Integración en `dsp_chain.c` después de EQ, antes de limiter
-  - UI: toggle on/off + slider de intensidad
+  - Coste: ~100 cycles
 
-- [ ] **Loudness Compensation (Equal Loudness)**
-  - Compensación Fletcher-Munson: boost graves y agudos a volumen bajo
-  - Curvas ISO 226 simplificadas (3-4 filtros)
-  - Se activa automáticamente según nivel de volumen del sistema
-  - Coste: ~3-4 filtros × 18 = 54-72 cycles
-  - UI: toggle on/off (automático según volumen)
+- [ ] **Loudness Compensation** (Fletcher-Munson)
+  - Boost graves/agudos a volumen bajo (ISO 226)
+  - 3-4 filtros × 18 = 54-72 cycles
 
-### **Prioridad MEDIA**
+### Prioridad MEDIA
 
-- [ ] **Balance L/R**
-  - Control de balance izquierda/derecha (-100 a +100)
-  - Implementación: multiplicación por factor (0.0 a 1.0) por canal
-  - Coste: ~4 cycles (2 multiplicaciones)
-  - UI: slider horizontal centrado
+- [ ] **Balance L/R** — trivial, ~4 cycles
+- [ ] **Selección filtro digital DAC** — ES9039Q2M tiene 7 presets via SPI/I2C
+- [ ] **NVS Storage** para presets personalizados (5-10 slots)
+- [ ] **Más presets** predefinidos (Pop, Metal, Electronic, Vocal, Acoustic)
+- [ ] **CUE sheet testing** (falta archivo .cue de prueba)
+- [ ] **DLNA/UPnP renderer** (componente creado, pendiente)
+- [ ] **Spotify Connect** (cspot integrado, en progreso)
 
-- [ ] **Selección de filtro digital DAC (ES9039Q2M)**
-  - ES9039Q2M tiene 7 filtros digitales seleccionables via I2C
-  - Opciones: Fast Roll-Off, Slow Roll-Off, Minimum Phase, Apodizing, Hybrid, Brick Wall, etc.
-  - Cada uno con distinta respuesta de fase y ringing
-  - Acceso: registro I2C del DAC (sin coste DSP, lo hace el DAC)
-  - UI: selector dropdown con descripción de cada filtro
-  - Requisito: driver I2C para ES9039Q2M (se implementará en migración hardware)
+### Prioridad BAJA (Futuro)
 
-- [ ] **NVS Storage para presets personalizados**
-  - Guardar configuración de EQ del usuario en flash
-  - Cargar último preset al boot
-  - Máximo 5-10 presets de usuario
-  - API: `preset_save_to_nvs()`, `preset_load_from_nvs()`, `preset_delete_from_nvs()`
-  - Almacenar: 5 bandas + crossfeed + loudness + balance + nombre
+- [ ] **DRC** (Dynamic Range Compression) — solo viable @ ≤192kHz
+- [ ] **Room correction** offline (pre-procesar en app companion)
+- [ ] **Gapless playback** entre pistas
+- [ ] **OTA firmware updates** via WiFi
 
-- [ ] **Integrar con UI (cuando F2 esté lista)**
-  - Medidor de CPU en tiempo real
-  - Selector de presets con validación
-  - EQ paramétrico con sliders + curva de respuesta
-  - Advertencia si cambio de sample rate excede límite
-  - Ver ejemplos en `DSP_BUDGET_GUIDE.md`
+### Hardware (Placa Final)
 
-- [ ] **Más presets predefinidos**
-  - Pop, Metal, Electronic, Vocal, Acoustic, Podcast
-  - Cada uno con 3-5 filtros optimizados
-  - Basados en curvas de referencia de la industria
-
-### **Prioridad BAJA (Futuro)**
-
-- [ ] **Dynamic Range Compression (DRC)**
-  - Limiter, compressor, expander
-  - Solo viable @ ≤192kHz (coste alto ~80 cycles)
-  - Útil para escucha nocturna / ambientes ruidosos
-
-- [ ] **Room correction (offline)**
-  - Pre-procesar en app companion
-  - Enviar coefficients via CDC/WiFi
-  - Cargar como preset personalizado
-
-- [ ] **Adaptive EQ**
-  - Analizar contenido en tiempo real
-  - Ajustar EQ dinámicamente
-  - Muy costoso, solo @ 48-96kHz
-
-- [ ] **Limpieza código legacy**
-  - Eliminar arrays `coeffs_48k` en `dsp_presets.c` (código muerto, ya no se usa)
-  - Hacer diagnósticos condicionales con `#ifdef` en audio_task/feeder
+- [ ] **ES9039Q2M DAC** — driver SPI, filtros, THD compensation
+- [ ] **MIPI DSI display** 720×1280
+- [ ] **Touch panel** I2C
+- [ ] **MAX77972** cargador + fuel gauge
+- [ ] **BMA400** acelerómetro
+- [ ] **5 botones GPIO** con debounce
+- [ ] **ESP32-C5** migración desde C6
+- [ ] **Jack 4.4mm** detección GPIO
 
 ---
 
-## 🐛 Issues Conocidos
+## Issues Conocidos
 
-### **RESUELTO ✅**: Audio stuttering
-- **Problema**: Audio entrecortado con DSP activo
-- **Causa**: Buffer conversion overhead demasiado alto
-- **Solución**: Frame-by-frame processing + ILP optimization
-- **Estado**: ✅ Funciona correctamente
+### RESUELTO: Audio stuttering con DSP
+- **Causa**: Buffer conversion overhead
+- **Solución**: Frame-by-frame + ILP optimization
 
-### **RESUELTO ✅**: EQ no audible
-- **Problema**: Cambios de EQ no perceptibles
-- **Causa**: Gain insuficiente (+6dB @ 80Hz no audible)
-- **Solución**: Preset extremo (+12dB @ 100Hz, +20dB @ 1kHz test)
-- **Estado**: ✅ Test preset confirma DSP funcionando
+### RESUELTO: EQ no audible
+- **Causa**: Gain insuficiente
+- **Solución**: Presets extremos (+12dB, +20dB)
 
-### **RESUELTO ✅**: Stream buffer overflow + data loss
-- **Problema**: ovf=300-600/2s overflow, blk=750/2s partial writes en I2S
-- **Causa 1**: `i2s_channel_write(..., 5)` → 5ms/10ms_per_tick = 0 ticks = non-blocking
-- **Causa 2**: `xStreamBufferSend(..., 0)` non-blocking → FIFO no acumula → feedback no regula host
-- **Solución**: Arquitectura space-check: audio_task verifica espacio antes de leer FIFO + feeder con retry loop + notificación entre tasks
-- **Estado**: ✅ ovf=0, blk=0, FIFO 40-91% estable
+### RESUELTO: Stream buffer overflow
+- **Causa**: Non-blocking writes + no flow control
+- **Solución**: Space-check architecture + task notification
 
-### **RESUELTO ✅**: DSP ruido terrible @ 48kHz con presets
-- **Problema**: Ruido extremo al aplicar Rock/Jazz/Classical @ 48kHz (bypass OK)
-- **Causa**: Coeficientes pre-calculados `coeffs_48k` tenían b0/b1/b2 exactamente 2x demasiado altos (ganancia DC +37dB en vez de +12dB)
-- **Solución**: Eliminado path pre-calculado, siempre usar `biquad_calculate_coeffs()` dinámico
-- **Estado**: ✅ Todos los presets suenan correctamente
+### RESUELTO: Coeficientes biquad 2x
+- **Causa**: Pre-calculated coeffs tenían b0/b1/b2 duplicados
+- **Solución**: Siempre usar cálculo dinámico
 
-### **RESUELTO ✅**: I2S no reconfigura entre pistas SD
-- **Problema**: Canciones suenan aceleradas al cambiar entre pistas con distinto sample rate (SD→SD)
-- **Causa**: `audio_source_switch()` tenía `if (old == new_source) return;` que saltaba la reconfiguración I2S
-- **Solución**: Comparar formato actual vs nuevo antes del early return, reconfigurar si difiere
-- **Estado**: ✅ Funciona correctamente
+### RESUELTO: I2S no reconfig entre pistas SD
+- **Causa**: `audio_source_switch()` early return cuando source==source
+- **Solución**: Comparar formato, no solo source
 
-### **RESUELTO ✅**: I2S fallback rate mismatch
-- **Problema**: Si `i2s_output_init(352800)` falla y cae a 48kHz internamente, el pipeline se configura a 352800Hz
-- **Causa**: `i2s_output_init` retornaba `void`, el caller no sabía la tasa real configurada
-- **Solución**: Cambiado a `uint32_t i2s_output_init()` que retorna la tasa real. Todos los callers usan `actual_rate`
-- **Estado**: ✅ Pipeline siempre sincronizado con I2S real
+### RESUELTO: DHCP no funciona via esp_hosted
+- **Causa**: ACD ARP probe broadcast unreliable via SDIO → DECLINE
+- **Solución**: `CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP=y`
 
-### **RESUELTO ✅**: mono_buf overflow con decode block 1024
-- **Problema**: Overflow en codecs WAV/FLAC al decodificar mono con block size 1024 (buf era 480)
-- **Solución**: `mono_buf[480]` → `mono_buf[1024]` en codec_wav.c y codec_flac.c
-- **Estado**: ✅ Corregido
+### RESUELTO: esp_hosted SDIO crash (DRAM OOM)
+- **Causa**: TCP window 256KB → 170+ pbufs en internal DRAM
+- **Solución**: `TCP_WND_DEFAULT=32768`, `WND_SCALE=n`
 
-### **CONOCIDO ⚠️**: ES8311 no soporta >96kHz bien
-- **Problema**: 192kHz FLAC suena raro en placa de desarrollo (ES8311)
-- **Causa**: MCLK = 192000×256 = 49.15MHz excede límite del ES8311 (~24-25MHz max)
-- **Estado**: Limitación de hardware dev board. ES9039Q2M (placa final) soporta hasta 50MHz MCLK
-- **Workaround**: Limitar a 96kHz en dev board, o ignorar (placa final no tendrá este problema)
+### RESUELTO: DDR50 data corruption on GPIO Matrix
+- **Causa**: GPIO Matrix skew (~5-10 ns) + no tuning
+- **Solución**: SDR50 100MHz con CMD19 tuning
 
-### **PENDIENTE ⚠️**: Crossfeed no implementado
-- **Problema**: Preset Headphone no hace nada (solo flat)
-- **Solución**: Implementar crossfeed (TODO prioridad alta)
-- **Workaround**: Usar otros presets mientras tanto
+### RESUELTO: Partition overflow con codecs adicionales
+- **Causa**: Binary 2.3 MB > factory partition 2 MB
+- **Solución**: Factory partition 2 MB → 3 MB
 
-### **PENDIENTE ⚠️**: CUE sheet sin testear
-- **Problema**: Parser implementado pero sin archivo .cue de prueba
-- **Solución**: Conseguir un CD rip (single FLAC/WAV + .cue) y probar comandos `play album.cue`, `track`, `next`, `prev`
+### CONOCIDO: ES8311 no soporta >96kHz bien
+- **Causa**: MCLK 49.15 MHz excede límite ES8311 (~25 MHz)
+- **Estado**: Limitación dev board. ES9039Q2M soporta hasta 50 MHz.
+
+### CONOCIDO: CUE sheet sin testear
+- **Estado**: Parser implementado, falta archivo .cue de prueba
 
 ---
 
-## 📊 Notas Técnicas Importantes
-
-### **Cycle Budget @ 384kHz**
-
-```
-CPU: 400 MHz / (384 kHz × 2 ch) = 1042 cycles/sample
-Safety (85%):                     885 cycles/sample
-Base overhead:                    -34 cycles (conversión + limiter)
-Available for filters:            851 cycles
-
-Max filters: 851 / 18 = 47 filtros teórico
-Safe limit:  25-30 filtros recomendado
-```
-
-### **Costes de ciclos (medidos/estimados)**
-
-| Operación | Ciclos | Notas |
-|-----------|--------|-------|
-| int32 → float (2ch) | 8 | FPU |
-| Biquad (optimized) | 18 | ILP + FPU pipeline |
-| Soft limiter | 14 | tanh + threshold |
-| float → int32 (2ch) | 8 | FPU |
-| Hard clipping | 4 | Final safety |
-| **TOTAL (1 filter)** | **52** | **Base + 1 biquad** |
-| Crossfeed (future) | 100 | Estimado |
-| DRC (future) | 80 | Estimado |
-
-### **Estructura de preset_config_t**
-
-```c
-typedef struct {
-    const char *name;                        // Nombre
-    const char *description;                 // Descripción
-    uint8_t num_filters;                     // Número de filtros
-    biquad_params_t filters[10];             // Params (freq, gain, Q)
-    bool enable_crossfeed;                   // Crossfeed on/off
-    const biquad_coeffs_t *coeffs_48k;       // Pre-calculados @ 48kHz
-} preset_config_t;
-```
-
-### **Coeficientes biquad (RBJ Audio EQ Cookbook)**
-
-Calculados dinámicamente por `biquad_calculate_coeffs()` en cada cambio de formato:
-- omega = 2pi x freq / fs
-- A = 10^(gain_db / 40)
-- alpha = sin(omega) / (2 x Q)
-- Formulas RBJ para cada tipo de filtro (lowshelf, highshelf, peaking, lowpass, highpass)
-- Normalización por a0 (divide b0/b1/b2/a1/a2 entre a0)
-
-**NOTA**: Los arrays `coeffs_48k` pre-calculados en `dsp_presets.c` tenian error 2x en b0/b1/b2.
-El path pre-calculado fue eliminado. Ahora siempre se usa calculo dinamico.
-
-### **Soft Limiter (tanh)**
-
-```c
-if (|sample| > 0.95) {
-    sample = tanh(sample × 0.9) / 0.9
-}
-```
-
-Ventajas:
-- Compresión suave sin distorsión audible
-- Threshold @ 95% previene clipping
-- tanh natural compressor (curva sigmoidea)
-
-Desventajas:
-- +10 cycles vs hard clipping
-- Vale la pena por calidad
-
----
-
-## 🔧 Configuración Actual
-
-### **Archivos principales modificados**
-
-```
-main/
-├── app_main.c                     ← Integración DSP + CDC commands
-├── CMakeLists.txt                 ← Dependency audio_pipeline
-
-components/audio_pipeline/
-├── include/*.h                    ← Headers DSP
-├── *.c                            ← Implementación
-└── CMakeLists.txt                 ← Component registration
-```
-
-### **Comandos útiles**
-
-```bash
-# Build normal (sin debug logging)
-idf.py build
-
-# Build con debug logging
-idf.py -D CMAKE_C_FLAGS="-DDSP_DEBUG_LOGGING" build
-
-# Flash y monitor
-idf.py flash monitor
-
-# CDC commands (desde terminal serial)
-help           # Lista comandos disponibles
-rock           # Cargar preset Rock
-jazz           # Cargar preset Jazz
-classical      # Cargar preset Classical
-bass           # Cargar preset Bass Boost
-test           # Cargar preset Test Extreme (+20dB @ 1kHz)
-flat           # Bypass
-on             # Enable DSP
-off            # Disable DSP (bypass)
-status         # Info actual (preset, DSP on/off)
-```
-
-### **Flags de compilación importantes**
-
-```cmake
-# CMakeLists.txt (main)
-PRIV_REQUIRES audio_pipeline   # Dependency DSP
-
-# Para debug logging (opcional)
-add_compile_definitions(DSP_DEBUG_LOGGING)
-```
-
----
-
-## 🎯 Decisiones para UI (cuando F2 esté lista)
-
-### **1. Medidor de CPU**
-
-```
-┌─────────────────────────────────────────┐
-│  DSP CPU Usage                          │
-│  ████████░░░░░░░░░░░░░░░░  40%         │
-│  10 filters active (max 25 @ 384kHz)   │
-└─────────────────────────────────────────┘
-
-Color coding:
-• Verde (0-50%): Safe
-• Amarillo (50-70%): Monitor
-• Naranja (70-85%): High
-• Rojo (>85%): Critical
-```
-
-### **2. Validación de presets**
-
-```c
-// Antes de aplicar preset seleccionado por usuario
-if (dsp_chain_validate_preset(&dsp, selected_preset)) {
-    apply_preset(selected_preset);
-} else {
-    show_error("Preset too complex for current sample rate.\n"
-               "Options:\n"
-               "• Reduce sample rate\n"
-               "• Choose simpler preset");
-}
-```
-
-### **3. Advertencia cambio de sample rate**
-
-```c
-if (current_filters > max_at_new_rate) {
-    show_warning("Changing to %d Hz will disable %d filters.\n"
-                 "Continue?",
-                 new_rate,
-                 current_filters - max_at_new_rate);
-}
-```
-
-Ver `DSP_BUDGET_GUIDE.md` para más ejemplos.
-
----
-
-## 📚 Documentación Relacionada
-
-- **`README.md`** - Documentación principal del proyecto
-- **`DSP_BUDGET_GUIDE.md`** - Guía completa de integración UI con budget API
-- **`components/audio_pipeline/include/*.h`** - API headers con documentación
-
----
-
-## 🚀 Próximos Pasos Recomendados
-
-### **Próxima sesión — DSP Features (F3.5):**
-
-1. **EQ Paramétrico 5 bandas** (feature principal de producto)
-   - Añadir API de control: `dsp_chain_set_band(band_idx, freq, gain_db, Q)`
-   - Integrar recálculo dinámico de coeficientes
-   - Testing con sweep de frecuencias
-
-2. **Crossfeed** (mejora auriculares)
-   - Investigar algoritmo Chu Moy o Jan Meier
-   - Crear `dsp_crossfeed.c` y `dsp_crossfeed.h`
-   - Integrar en `dsp_chain.c`
-
-3. **Balance L/R** (implementación trivial)
-   - Añadir a `dsp_chain_t`: `float balance_l`, `float balance_r`
-   - Aplicar después de EQ, antes de limiter
-
-### **A medio plazo — Software:**
-
-1. **CUE sheet testing** (cuando tengas un .cue de prueba)
-2. **Loudness compensation** (Fletcher-Munson)
-3. **NVS Storage** para guardar presets de usuario
-4. **Más presets** predefinidos (Pop, Metal, Electronic, Vocal, Acoustic)
-
-### **Hardware — Placa final:**
-
-1. Migrar de ES8311 a ES9039Q2M (driver SPI para registros)
-2. Implementar selector de filtro digital del DAC (7 opciones)
-3. Ajustar MCLK para 384kHz (49.15 MHz con MCLK×128)
-4. Display MIPI DSI + LVGL (F2)
-5. Botones GPIO (F5)
-6. MAX77972 power management (F4)
-7. SDMMC DDR50 experimental (si se necesita más throughput SD)
-
----
-
-## 📊 Arquitectura Audio Pipeline (Actual)
+## Arquitectura Audio Pipeline (Actual)
 
 ```
 USB Host ──→ TinyUSB FIFO (12.5KB) ──→ audio_task (DSP) ──┐
                 ↑                                          │
                 └── async feedback ←── FIFO level          │
                                                            ↓
-SD Card ──→ sd_player_task (decode) ──→ audio_source ──→ StreamBuffer (16KB) ──→ i2s_feeder_task ──→ I2S DMA ──→ DAC
-        WAV/FLAC/MP3 codecs              manager              ↓ notify
-        setvbuf 32KB                   (USB/SD switch)    xTaskNotifyGive()
-        1024 frames/block              i2s_output_init()
-                                       (returns actual_rate)
+SD Card ──→ sd_player_task (decode) ──→ audio_source ──→ StreamBuffer (16KB)
+        9 codecs (WAV/FLAC/MP3/         manager              │
+        AAC/ALAC/Opus/DSD/M4A)      (USB/SD/NET switch)      ↓
+        setvbuf 32KB, 1024 fr/blk   i2s_output_init     i2s_feeder_task
+        ReplayGain Q16               (actual_rate)            │
+                                                              ↓
+HTTP ──→ net_audio_task (stream) ──→ audio_source ──→  I2S DMA → DAC
+        MP3/FLAC/WAV/AAC/Ogg           manager               │
+        ICY metadata, HTTPS                                   ↓
+        pre-buffer, pause/resume            4.4mm Balanced Output
 ```
 
-- **audio_task** (prio 5, core 1, 12KB stack): Lee FIFO solo si hay espacio en stream buffer, aplica DSP, escribe non-blocking
-- **i2s_feeder_task** (prio 4, core 1, 8KB stack): Lee stream buffer, escribe I2S con retry loop (timeout 100ms), notifica audio_task
-- **sd_player_task** (prio 3, core 0, 8KB stack): Decodifica SD audio, escribe al stream buffer, detecta cambios de formato
-- **audio_source manager**: Conmuta USB/SD, flush buffers, reconfig I2S con rate real (fallback-safe)
-- **Resultado USB**: ovf=0, blk=0, FIFO 40-91%, loop=220us
-- **Resultado SD**: WAV/FLAC/MP3 playback, auto-reconfig I2S entre pistas con distinto formato
-
-## ✅ Checklist de Continuación
-
-### Core Audio (COMPLETADO)
-- [x] **DSP compilando sin warnings**
-- [x] **Presets funcionando correctamente** (coeficientes dinámicos)
-- [x] **Pipeline estable** (zero overflow, zero data loss)
-- [x] **Formato switching USB** (192kHz ↔ 48kHz sin problemas)
-- [x] **SD Player** — WAV, FLAC, MP3, playlist, avance pistas
-- [x] **I2S reconfig entre pistas SD** (same-source + fallback rate)
-- [x] **MSC optimizado** (15 MB/s read, 7.2 MB/s write)
-- [x] **CUE parser** implementado (pendiente testing)
-- [x] **SD throughput** — setvbuf 32KB, decode block 1024
-
-### Pendiente Software
-- [ ] **CUE sheet testing** ⏸️ (falta archivo .cue de prueba)
-- [ ] **EQ Paramétrico 5 bandas** ⏸️ (siguiente feature DSP)
-- [ ] **Crossfeed implementado** ⏸️ (pendiente)
-- [ ] **Loudness compensation** ⏸️ (pendiente)
-- [ ] **Balance L/R** ⏸️ (trivial)
-- [ ] **NVS storage** ⏸️ (pendiente)
-- [ ] **Limpieza código legacy** ⏸️ (coeffs_48k muertos, diagnósticos)
-
-### Pendiente Hardware / Integración
-- [ ] **Display MIPI DSI + LVGL** (F2)
-- [ ] **ES9039Q2M DAC** (placa final — SPI control, I2S data)
-- [ ] **Botones GPIO** (F5)
-- [ ] **MAX77972 power management** (F4)
-- [ ] **ESP32-C5 wireless** (F7)
-- [ ] **SDMMC DDR50 experimental** (investigado, no implementado)
+**Tasks:**
+- **audio_task** (prio 5, core 1, 12KB): USB FIFO → DSP → StreamBuffer
+- **i2s_feeder_task** (prio 4, core 1, 8KB): StreamBuffer → I2S DMA → DAC
+- **sd_player_task** (prio 3, core 0, 8KB): SD decode → StreamBuffer
+- **net_audio_task** (prio 3, core 0, 8KB): HTTP stream → decode → StreamBuffer
+- **tusb_device_task** (prio 5, core 1): TinyUSB USB events
 
 ---
 
-**Fin del TODO - Actualizar según progreso**
+## Notas Técnicas
+
+### Cycle Budget @ 384kHz
+
+```
+CPU: 400 MHz / (384 kHz × 2 ch) = 1042 cycles/sample
+Safety (85%):                     885 cycles/sample
+Base overhead:                    -34 cycles (conversión + limiter)
+Available for filters:            851 cycles
+Max: 851 / 18 = 47 filtros teórico, 25-30 recomendado
+```
+
+### MSC Performance (SDR50 100MHz UHS-I)
+
+| Operación | Velocidad | Notas |
+|-----------|-----------|-------|
+| READ | ~13.5 MB/s | Bottleneck: DWC2 slave mode |
+| WRITE | ~8.7 MB/s avg (peak 11.1) | Bottleneck: NAND flash |
+
+### Memory Budget
+
+- **Internal DRAM** (~768 KB): DMA buffers, TCP/IP, FreeRTOS stacks
+- **PSRAM** (32 MB): Audio buffers, LVGL framebuffers, sample tables, decode state
+- **Flash** (8 MB min): Firmware ~2.3 MB, LVGL assets ~2-4 MB, NVS 64 KB
+- **Factory partition**: 3 MB (0x300000)
+
+### SDMMC Speed Modes
+
+| Mode | Freq | Voltage | Status |
+|------|------|---------|--------|
+| SDR50 100MHz | 100 MHz | 1.8V UHS-I | **Production** |
+| SDR 40MHz HS | 40 MHz | 3.3V | Fallback |
+| DDR50 | Any | Any | BROKEN (GPIO Matrix) |
+
+---
+
+**Fin del TODO — Actualizar según progreso**

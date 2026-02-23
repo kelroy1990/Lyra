@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\_deps\lvgl-subbuild\CMakeFiles\13ca361fb2dfc6dd04520d770bba8c4f\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{344BF2BF-E515-3383-AF5E-38DA8E3AEC76}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

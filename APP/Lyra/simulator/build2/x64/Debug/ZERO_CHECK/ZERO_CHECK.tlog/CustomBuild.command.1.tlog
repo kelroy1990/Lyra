@@ -1,0 +1,10 @@
+^D:\1.- PERSONAL PROYECTS\FIRMWARE WALKMAN\APP\LYRA\SIMULATOR\BUILD2\CMAKEFILES\31C5EFB93A4974748799248A4C1601E7\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SD:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator" "-BD:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2" --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file "D:/1.- Personal Proyects/Firmware Walkman/APP/Lyra/simulator/build2/lyra_sim.slnx"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

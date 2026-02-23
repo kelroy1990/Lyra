@@ -34,6 +34,7 @@ typedef struct {
     // Source IDs — must match audio_source_t enum in main/audio_source.h.
     // Passed here to avoid a component→main include dependency.
     int audio_source_none;  // AUDIO_SOURCE_NONE value
+    int audio_source_usb;   // AUDIO_SOURCE_USB  value (fallback on stop/EOF)
     int audio_source_net;   // AUDIO_SOURCE_NET  value
 
     // Called once during init to register net pause/resume callbacks.
@@ -61,7 +62,7 @@ void net_audio_start_task(void);
 esp_err_t net_audio_cmd_start(const char *url, const char *codec_hint,
                                const char *referer);
 
-// Stop current stream, switch source to NONE
+// Stop current stream, switch audio source back to USB
 void net_audio_cmd_stop(void);
 
 // Pause consumption without closing HTTP connection

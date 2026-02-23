@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 #include <esp_log.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -13,6 +14,26 @@
 #include "esp_timer.h"
 
 static const char *TAG = "sd_player";
+
+/* Returns a human-readable format name, e.g. "FLAC", "DSD64", "DSD128", "DSD256" */
+static const char *format_name(const codec_info_t *info)
+{
+    if (info->is_dsd) {
+        if (info->sample_rate <= 176400) return "DSD64";
+        if (info->sample_rate <= 352800) return "DSD128";
+        return "DSD256";
+    }
+    switch (info->format) {
+        case CODEC_FORMAT_MP3:  return "MP3";
+        case CODEC_FORMAT_WAV:  return "WAV";
+        case CODEC_FORMAT_FLAC: return "FLAC";
+        case CODEC_FORMAT_AAC:  return "AAC";
+        case CODEC_FORMAT_OPUS: return "Opus";
+        case CODEC_FORMAT_ALAC: return "ALAC";
+        case CODEC_FORMAT_M4A:  return "M4A";  /* dispatcher, should not normally appear */
+        default:                return "???";
+    }
+}
 
 //--------------------------------------------------------------------+
 // Command types for the player queue
@@ -257,8 +278,7 @@ static void player_start_playback(const char *filepath)
             cue_track_t *t = &s_player.cue->tracks[0];
             s_player.output("Playing: %s [%s %luHz %d-bit]\r\n",
                 s_player.cue->title[0] ? s_player.cue->title : s_player.current_file,
-                s_player.current_info.format == CODEC_FORMAT_MP3 ? "MP3" :
-                s_player.current_info.format == CODEC_FORMAT_WAV ? "WAV" : "FLAC",
+                format_name(&s_player.current_info),
                 s_player.current_info.sample_rate,
                 s_player.current_info.bits_per_sample);
             s_player.output("  Track 1/%d: %s\r\n",
@@ -267,8 +287,7 @@ static void player_start_playback(const char *filepath)
         } else {
             s_player.output("Playing: %s [%s %luHz %d-bit %s]\r\n",
                 s_player.current_file,
-                s_player.current_info.format == CODEC_FORMAT_MP3 ? "MP3" :
-                s_player.current_info.format == CODEC_FORMAT_WAV ? "WAV" : "FLAC",
+                format_name(&s_player.current_info),
                 s_player.current_info.sample_rate,
                 s_player.current_info.bits_per_sample,
                 s_player.current_info.channels == 1 ? "mono" : "stereo");
@@ -540,9 +559,34 @@ static void sd_player_task(void *arg)
             continue;
         }
 
-        // Apply DSP
+        /* Apply ReplayGain (PCM only, not DSD/DoP) */
+        if (!s_player.current_info.is_dsd && s_player.current_info.gain_db != 0.0f) {
+            /*
+             * Fixed-point Q16 gain: precompute once per gain_db value.
+             * gain_q16 = 10^(gain_db/20) * 65536
+             * Multiply each sample by gain_q16 using 64-bit intermediate.
+             */
+            static float   s_last_gain_db = 0.0f;
+            static int32_t s_gain_q16     = 65536;   /* 1.0 in Q16 */
+            if (s_player.current_info.gain_db != s_last_gain_db) {
+                s_last_gain_db = s_player.current_info.gain_db;
+                s_gain_q16 = (int32_t)(powf(10.0f, s_last_gain_db / 20.0f) * 65536.0f);
+            }
+            int32_t *p = decode_buf;
+            int32_t  gq = s_gain_q16;
+            for (int32_t i = 0; i < frames * 2; i++) {
+                int64_t s = ((int64_t)p[i] * gq) >> 16;
+                if      (s >  INT32_MAX) s =  INT32_MAX;
+                else if (s <  INT32_MIN) s =  INT32_MIN;
+                p[i] = (int32_t)s;
+            }
+        }
+
+        /* Apply DSP — bypassed for DSD (DoP frames cannot be processed by biquad EQ) */
         uint32_t t_dsp = (uint32_t)esp_timer_get_time();
-        s_player.audio.process_audio(decode_buf, (uint32_t)frames);
+        if (!s_player.current_info.is_dsd) {
+            s_player.audio.process_audio(decode_buf, (uint32_t)frames);
+        }
         uint32_t dsp_us = (uint32_t)esp_timer_get_time() - t_dsp;
 
         // Write to stream buffer
@@ -776,14 +820,12 @@ void sd_player_cmd_track_info(void)
             s_player.output("  Track artist: %s\r\n", t->performer);
         }
         s_player.output("  Format: %s %luHz %d-bit\r\n",
-            st.file_info.format == CODEC_FORMAT_MP3 ? "MP3" :
-            st.file_info.format == CODEC_FORMAT_WAV ? "WAV" : "FLAC",
+            format_name(&st.file_info),
             st.file_info.sample_rate, st.file_info.bits_per_sample);
     } else {
         s_player.output("[%s] %s\r\n", state_str, st.current_file);
         s_player.output("  Format: %s %luHz %d-bit %s\r\n",
-            st.file_info.format == CODEC_FORMAT_MP3 ? "MP3" :
-            st.file_info.format == CODEC_FORMAT_WAV ? "WAV" : "FLAC",
+            format_name(&st.file_info),
             st.file_info.sample_rate, st.file_info.bits_per_sample,
             st.file_info.channels == 1 ? "mono" : "stereo");
     }

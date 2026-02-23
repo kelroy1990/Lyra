@@ -1,0 +1,3 @@
+[submodule "APP/Lyra/components/spotify/vendor/cspot"]
+	path = APP/Lyra/components/spotify/vendor/cspot
+	url = https://github.com/feelfreelinux/cspot

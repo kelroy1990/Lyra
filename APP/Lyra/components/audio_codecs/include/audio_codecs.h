@@ -12,6 +12,12 @@ typedef enum {
     CODEC_FORMAT_WAV,
     CODEC_FORMAT_FLAC,
     CODEC_FORMAT_MP3,
+    CODEC_FORMAT_DSD,   /* DSF/DFF container — codec_decode() outputs DoP int32_t frames,
+                           DSP pipeline must be bypassed for this format */
+    CODEC_FORMAT_AAC,   /* AAC-LC / HE-AAC in ADTS container (.aac) */
+    CODEC_FORMAT_OPUS,  /* Opus audio in Ogg container (.opus) — always 48 kHz output */
+    CODEC_FORMAT_M4A,   /* M4A/M4B/MP4 container — dispatcher; sub-opens as AAC or ALAC */
+    CODEC_FORMAT_ALAC,  /* Apple Lossless in M4A container (.m4a) */
 } codec_format_t;
 
 //--------------------------------------------------------------------+
@@ -19,12 +25,16 @@ typedef enum {
 //--------------------------------------------------------------------+
 
 typedef struct {
-    uint32_t sample_rate;
-    uint8_t  bits_per_sample;   // Original file bit depth (16, 24, 32)
-    uint8_t  channels;          // 1 (mono) or 2 (stereo)
-    uint64_t total_frames;      // Total PCM frames (0 if unknown)
-    uint32_t duration_ms;       // Duration in milliseconds (0 if unknown)
+    uint32_t sample_rate;      /* PCM: audio sample rate.
+                                  DSD:  DoP PCM rate = DSD_rate / 16
+                                        (DSD64→176400, DSD128→352800, DSD256→705600) */
+    uint8_t  bits_per_sample;  /* PCM: original bit depth (16/24/32).  DSD: always 32 (DoP) */
+    uint8_t  channels;         /* 1 (mono) or 2 (stereo) */
+    uint64_t total_frames;     /* PCM: stereo frames.  DSD: DoP frames (DSD samples / 16) */
+    uint32_t duration_ms;      /* Duration in milliseconds (0 if unknown) */
     codec_format_t format;
+    bool     is_dsd;           /* true → output is DoP, DSP chain must be bypassed */
+    float    gain_db;          /* ReplayGain track gain in dB (0.0 = no tag / no adjustment) */
 } codec_info_t;
 
 //--------------------------------------------------------------------+

@@ -6,7 +6,17 @@
 
 static const char *TAG = "playlist";
 
-static const char *AUDIO_EXTENSIONS[] = { ".wav", ".flac", ".mp3", ".cue", NULL };
+static const char *AUDIO_EXTENSIONS[] = {
+    ".wav", ".aif", ".aiff",   /* WAV / AIFF (dr_wav)          */
+    ".flac",                   /* FLAC       (dr_flac)         */
+    ".mp3",                    /* MP3        (dr_mp3)          */
+    ".dsf", ".dff",            /* DSD        (DoP)             */
+    ".aac",                    /* AAC-LC/HE-AAC ADTS           */
+    ".opus",                   /* Opus in Ogg                  */
+    ".m4a", ".m4b",            /* M4A/M4B (AAC-LC or ALAC)    */
+    ".cue",                    /* CUE sheet                    */
+    NULL
+};
 
 static bool is_audio_file(const char *name)
 {

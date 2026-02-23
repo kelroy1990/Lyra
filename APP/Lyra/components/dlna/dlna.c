@@ -312,39 +312,37 @@ static esp_err_t handle_avtransport_control(httpd_req_t *req)
     } else if (strcmp(action, "GetPositionInfo") == 0) {
         uint32_t cur_s = s_dlna.current_ms / 1000;
         uint32_t tot_s = s_dlna.total_ms / 1000;
-        char extra[512];
+        // Note: TrackMetaData/TrackURI omitted from snprintf — stored separately
+        // in s_dlna state; buffers are too large to inline safely in a 512-byte stack buf.
+        char extra[256];
         snprintf(extra, sizeof(extra),
             "<Track>1</Track>"
             "<TrackDuration>%u:%02u:%02u</TrackDuration>"
-            "<TrackMetaData>%s</TrackMetaData>"
-            "<TrackURI>%s</TrackURI>"
+            "<TrackMetaData></TrackMetaData>"
+            "<TrackURI></TrackURI>"
             "<RelTime>%u:%02u:%02u</RelTime>"
             "<AbsTime>%u:%02u:%02u</AbsTime>"
             "<RelCount>2147483647</RelCount>"
             "<AbsCount>2147483647</AbsCount>",
-            tot_s / 3600, (tot_s % 3600) / 60, tot_s % 60,
-            s_dlna.current_metadata,
-            s_dlna.current_uri,
-            cur_s / 3600, (cur_s % 3600) / 60, cur_s % 60,
-            cur_s / 3600, (cur_s % 3600) / 60, cur_s % 60);
+            (unsigned)(tot_s / 3600), (unsigned)((tot_s % 3600) / 60), (unsigned)(tot_s % 60),
+            (unsigned)(cur_s / 3600), (unsigned)((cur_s % 3600) / 60), (unsigned)(cur_s % 60),
+            (unsigned)(cur_s / 3600), (unsigned)((cur_s % 3600) / 60), (unsigned)(cur_s % 60));
         soap_ok(req, AV_TRANSPORT_TYPE, action, extra);
 
     } else if (strcmp(action, "GetMediaInfo") == 0) {
         uint32_t tot_s = s_dlna.total_ms / 1000;
-        char extra[512];
+        char extra[384];  // fixed content is ~328 bytes
         snprintf(extra, sizeof(extra),
             "<NrTracks>1</NrTracks>"
             "<MediaDuration>%u:%02u:%02u</MediaDuration>"
-            "<CurrentURI>%s</CurrentURI>"
-            "<CurrentURIMetaData>%s</CurrentURIMetaData>"
+            "<CurrentURI></CurrentURI>"
+            "<CurrentURIMetaData></CurrentURIMetaData>"
             "<NextURI>NOT_IMPLEMENTED</NextURI>"
             "<NextURIMetaData>NOT_IMPLEMENTED</NextURIMetaData>"
             "<PlayMedium>NETWORK</PlayMedium>"
             "<RecordMedium>NOT_IMPLEMENTED</RecordMedium>"
             "<WriteStatus>NOT_IMPLEMENTED</WriteStatus>",
-            tot_s / 3600, (tot_s % 3600) / 60, tot_s % 60,
-            s_dlna.current_uri,
-            s_dlna.current_metadata);
+            (unsigned)(tot_s / 3600), (unsigned)((tot_s % 3600) / 60), (unsigned)(tot_s % 60));
         soap_ok(req, AV_TRANSPORT_TYPE, action, extra);
 
     } else {
@@ -792,7 +790,7 @@ esp_err_t dlna_renderer_start(const char *device_name)
     s_dlna.running = true;
 
     // Start SSDP task on CPU0 (network side)
-    xTaskCreatePinnedToCore(ssdp_task, "dlna_ssdp", 4096, NULL, 3,
+    xTaskCreatePinnedToCore(ssdp_task, "dlna_ssdp", 8192, NULL, 3,
                             &s_dlna.ssdp_task_handle, 0);
 
     ESP_LOGI(TAG, "DLNA renderer '%s' started (http://%s:%d)",

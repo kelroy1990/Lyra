@@ -1,0 +1,8 @@
+## IDF Component Manager manifest for the 'spotify' component.
+## Declares managed dependencies that are downloaded automatically on `idf.py build`.
+
+dependencies:
+  ## mdns was moved from IDF built-in components to the component registry in IDF 5.x.
+  ## Required by: bell/MDNSService (ESP32), spotify_glue.cpp (mDNS Zeroconf announcement).
+  espressif/mdns:
+    version: ">=1.3.0"

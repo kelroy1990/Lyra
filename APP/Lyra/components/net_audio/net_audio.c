@@ -541,7 +541,7 @@ static void run_decode_loop(void)
                 case NET_CMD_STOP:
                     ESP_LOGI(TAG, "Stop command received during playback");
                     cleanup_stream();
-                    s_net.audio.switch_source(s_net.audio.audio_source_none, 0, 0);
+                    s_net.audio.switch_source(s_net.audio.audio_source_usb, 0, 0);
                     s_net.state = NET_AUDIO_IDLE;
                     return;
 
@@ -593,7 +593,7 @@ static void run_decode_loop(void)
                 ESP_LOGI(TAG, "Stream EOF after %llu frames", s_net.diag.total_frames);
             }
             cleanup_stream();
-            s_net.audio.switch_source(s_net.audio.audio_source_none, 0, 0);
+            s_net.audio.switch_source(s_net.audio.audio_source_usb, 0, 0);
             s_net.state = NET_AUDIO_IDLE;
             return;
         }
@@ -664,7 +664,7 @@ static void net_audio_task(void *arg)
                 if (xQueueReceive(s_net.cmd_queue, &cmd, 0) == pdTRUE) {
                     if (cmd.type == NET_CMD_STOP) {
                         cleanup_stream();
-                        s_net.audio.switch_source(s_net.audio.audio_source_none, 0, 0);
+                        s_net.audio.switch_source(s_net.audio.audio_source_usb, 0, 0);
                         s_net.state = NET_AUDIO_IDLE;
                     } else if (cmd.type == NET_CMD_RESUME) {
                         // Re-claim audio source before resuming.

@@ -30,6 +30,8 @@
 #include "power.h"
 #include "wireless.h"
 #include "net_audio.h"
+#include "dlna.h"
+#include "spotify.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
@@ -351,10 +353,14 @@ uint32_t i2s_output_init(uint32_t sample_rate, uint8_t bits_per_sample)
             break;
     }
 
+    ESP_LOGI(TAG, "[I2S] Free DMA SRAM before alloc: %d bytes (largest block: %d)",
+             heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+             heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     chan_cfg.auto_clear_after_cb = true;
-    chan_cfg.dma_desc_num = 8;
-    chan_cfg.dma_frame_num = 480;
+    chan_cfg.dma_desc_num = 4;
+    chan_cfg.dma_frame_num = 240;
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &i2s_tx, NULL));
 
     // MCLK = sample_rate × multiplier.  APLL max usable = 62.5 MHz.
@@ -834,9 +840,125 @@ static int net_audio_cb_get_source(void)
     return (int)audio_source_get();
 }
 
+// TODO(source-priority): Current architecture is "last-caller-wins" — any source can call
+// audio_source_switch() at any time, immediately preempting whatever is playing. There is no
+// priority arbitration, no per-source pause/resume handoff, and no user-facing source selector.
+//
+// Consequences:
+//   • Spotify PLAYBACK_START fires switch_source(AUDIO_SRC_NET) even if USB or SD is active.
+//   • USB/SD can be reclaimed by Spotify mid-playback without warning.
+//   • Returning from Spotify to USB/SD requires manually pausing Spotify first.
+//
+// Proper fix (deferred until hardware screen + final board are available):
+//   1. Implement an audio_source_request(src, priority) / audio_source_release(src) API.
+//   2. Define a priority order: USB > SD > NET (Spotify/DLNA/HTTP) or make it user-configurable.
+//   3. On a higher-priority request: pause/mute the current lower-priority source, switch, store
+//      the preempted source so it can be resumed automatically when the high-priority source ends.
+//   4. On PLAYBACK_START from Spotify: only switch if no higher-priority source is active, or if
+//      the user explicitly selects Spotify via the screen.
+//   5. On Spotify DISC/disconnect: restore previous source (if any) automatically.
 static void net_audio_cb_switch_source(int src, uint32_t sr, uint8_t bits)
 {
     audio_source_switch((audio_source_t)src, sr, bits);
+}
+
+//--------------------------------------------------------------------+
+// DLNA renderer callbacks — forward to net_audio HTTP engine
+//--------------------------------------------------------------------+
+
+static void dlna_on_play(const char *url, const char *metadata)
+{
+    ESP_LOGI(TAG, "DLNA play: %s", url);
+    (void)metadata;  // Future: parse UPnP DIDL metadata for display
+    esp_err_t e = net_audio_cmd_start(url, NULL, NULL);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "DLNA: net_audio_cmd_start failed (%s)", esp_err_to_name(e));
+    }
+}
+
+static void dlna_on_pause(void)  { net_audio_cmd_pause(); }
+static void dlna_on_stop(void)   { net_audio_cmd_stop();  }
+static void dlna_on_seek(uint32_t target_ms)
+{
+    // Live radio streams don't support seek — silently ignore
+    (void)target_ms;
+}
+static void dlna_on_volume(uint8_t volume)
+{
+    if (codec_dev) esp_codec_dev_set_out_vol(codec_dev, (int)volume);
+}
+static void dlna_on_mute(bool mute)
+{
+    if (codec_dev) esp_codec_dev_set_out_mute(codec_dev, mute);
+}
+
+//--------------------------------------------------------------------+
+// Net services task — starts DLNA + Spotify after WiFi connects,
+// then keeps DLNA transport state in sync with net_audio.
+//--------------------------------------------------------------------+
+
+static void net_services_task(void *arg)
+{
+    (void)arg;
+
+    // Wait until WiFi is up (poll every 2 s — no rush, runs at low priority)
+    ESP_LOGI(TAG, "NET svc: waiting for WiFi...");
+    while (wireless_get_state() != WIRELESS_STATE_CONNECTED) {
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    ESP_LOGI(TAG, "NET svc: WiFi up — starting DLNA + Spotify");
+
+    // Register DLNA callbacks and start renderer
+    static const dlna_control_cbs_t dlna_cbs = {
+        .on_play   = dlna_on_play,
+        .on_pause  = dlna_on_pause,
+        .on_stop   = dlna_on_stop,
+        .on_seek   = dlna_on_seek,
+        .on_volume = dlna_on_volume,
+        .on_mute   = dlna_on_mute,
+    };
+    dlna_register_callbacks(&dlna_cbs);
+    esp_err_t ret = dlna_renderer_start("Lyra");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "DLNA start failed: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "DLNA renderer active (HTTP:7070, SSDP:239.255.255.250:1900)");
+    }
+
+    // Spotify Connect (stub — logs warning until cspot is integrated)
+    spotify_start();
+
+    // Monitor loop: sync net_audio state → DLNA transport state + position (1 Hz)
+    dlna_transport_state_t prev_dlna = DLNA_TRANSPORT_STOPPED;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        net_audio_state_t na = net_audio_get_state();
+        dlna_transport_state_t cur_dlna;
+        switch (na) {
+            case NET_AUDIO_PLAYING:    cur_dlna = DLNA_TRANSPORT_PLAYING;      break;
+            case NET_AUDIO_PAUSED:     cur_dlna = DLNA_TRANSPORT_PAUSED;       break;
+            case NET_AUDIO_CONNECTING:
+            case NET_AUDIO_BUFFERING:  cur_dlna = DLNA_TRANSPORT_TRANSITIONING; break;
+            default:                   cur_dlna = DLNA_TRANSPORT_STOPPED;       break;
+        }
+        if (cur_dlna != prev_dlna) {
+            dlna_set_transport_state(cur_dlna);
+            prev_dlna = cur_dlna;
+        }
+        if (na == NET_AUDIO_PLAYING || na == NET_AUDIO_PAUSED) {
+            net_audio_info_t info = net_audio_get_info();
+            dlna_set_position(info.elapsed_ms, 0);  // total_ms unknown for live streams
+        }
+    }
+}
+
+// DAC mute callback — used by audio_source for click-free transitions
+static void dac_mute_cb(bool mute)
+{
+    if (codec_dev) {
+        esp_codec_dev_set_out_mute(codec_dev, mute);
+    }
 }
 
 // Build full path from user input (relative to /sdcard)
@@ -1031,7 +1153,7 @@ static void sd_cmd_cat(const char *arg)
     fclose(f);
 }
 
-// Lightweight WAV header reader (no codec_open — safe for 4KB CDC stack)
+// Lightweight WAV header reader (no codec_open)
 static void sd_cmd_info(const char *arg)
 {
     if (!storage_is_mounted()) { cdc_printf("SD not mounted\r\n"); return; }
@@ -1795,6 +1917,22 @@ static void cdc_task(void *arg)
                             cdc_printf("Commands: net play <url>, net stop, net pause, "
                                        "net resume, net status\r\n");
                         }
+                    } else if (strncmp(rx_buf, "dlna", 4) == 0) {
+                        const char *sub = rx_buf + 4;
+                        while (*sub == ' ') sub++;
+                        if (strcmp(sub, "status") == 0 || sub[0] == '\0') {
+                            cdc_printf("DLNA: %s\r\n",
+                                       dlna_is_active() ? "active" : "inactive (no controller)");
+                        } else if (strcmp(sub, "stop") == 0) {
+                            dlna_renderer_stop();
+                            cdc_printf("DLNA: stopped\r\n");
+                        } else {
+                            cdc_printf("Commands: dlna status, dlna stop\r\n");
+                        }
+                    } else if (strncmp(rx_buf, "spotify", 7) == 0) {
+                        const char *sub = rx_buf + 7;
+                        while (*sub == ' ') sub++;
+                        spotify_handle_cdc_command(sub, cdc_printf);
                     } else {
                         cdc_printf("Unknown command. Type 'help'\r\n");
                     }
@@ -1939,11 +2077,12 @@ void app_main(void)
 
     // 5.5. Audio source manager
     audio_source_init();
+    audio_source_register_dac_mute_cb(dac_mute_cb);
 
     // 6. Tasks
     // CPU 0: USB stack (TinyUSB), CDC, and system tasks
     xTaskCreatePinnedToCore(tusb_device_task, "TinyUSB", 16384, NULL, 5, NULL, 0);
-    xTaskCreatePinnedToCore(cdc_task, "cdc", 4096, NULL, 3, NULL, 0);
+    xTaskCreatePinnedToCore(cdc_task, "cdc", 8192, NULL, 3, NULL, 0);
 
     // CPU 1: Audio pipeline (prio 5) + I2S feeder (prio 4)
     // audio_task has higher priority: must drain USB FIFO promptly to avoid overflow
@@ -1974,11 +2113,26 @@ void app_main(void)
         .get_stream_buffer    = audio_get_stream_buffer,
         .process_audio        = audio_pipeline_process,
         .audio_source_none    = (int)AUDIO_SOURCE_NONE,
+        .audio_source_usb     = (int)AUDIO_SOURCE_USB,
         .audio_source_net     = (int)AUDIO_SOURCE_NET,
         .register_source_cbs  = audio_source_register_net_cbs,
     };
     net_audio_init(&net_audio_cbs);
     net_audio_start_task();
 
-    ESP_LOGI(TAG, "Lyra ready - USB Audio 2.0 + SD Player + NET Audio -> ES8311 DAC");
+    // 9. Spotify Connect (F8-E) — stub until cspot library integrated
+    static const spotify_audio_cbs_t spotify_cbs = {
+        .get_source          = net_audio_cb_get_source,
+        .switch_source       = net_audio_cb_switch_source,
+        .set_producer_handle = audio_source_set_producer_handle,
+        .get_stream_buffer   = audio_get_stream_buffer,
+        .process_audio       = audio_pipeline_process,
+    };
+    spotify_init("Lyra", &spotify_cbs);
+
+    // 10. Network services task — waits for WiFi, then starts DLNA renderer + Spotify
+    // Runs at priority 2 (below audio pipeline) on any core
+    xTaskCreate(net_services_task, "net_svc", 4096, NULL, 2, NULL);
+
+    ESP_LOGI(TAG, "Lyra ready — USB + SD + NET + DLNA + Spotify -> ES8311 DAC");
 }

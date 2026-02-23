@@ -1,76 +1,11 @@
-# =============================================================================
-# Lyra sdkconfig.defaults
-# Applied on first build or after 'idf.py fullclean'
-# =============================================================================
+# C++ exceptions required by cspot (LoginBlob, Session, etc. throw on errors)
+# Without this, __cxa_allocate_exception is wrapped to call abort() by ESP-IDF
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+CONFIG_COMPILER_CXX_EXCEPTIONS_EMG_POOL_SIZE=0
 
-# ── ESP32-P4 Target ──
-CONFIG_IDF_TARGET="esp32p4"
-
-# ── WiFi Remote + ESP-Hosted (WiFi via SDIO companion) ──
-# Companion: Dev board = ESP32-C6-MINI-1, Final Lyra = ESP32-C5-WROOM-1U-N8R8
-# Chain: esp_wifi_remote → esp_hosted (SDIO transport) → companion slave
-#
-# CRITICAL: These Kconfig options are interdependent.
-# After 'idf.py fullclean && idf.py reconfigure', run:
-#   idf.py menuconfig
-# and configure:
-#   Component config → Wi-Fi Remote → Choose slave target → ESP32-C6 (dev) / ESP32-C5 (final)
-#   Component config → ESP-Hosted config → Host Interface → SDIO
-#   Component config → ESP-Hosted config → Development Board → No development board
-#   Component config → ESP-Hosted config → SDIO Configuration →
-#     SDIO Slot: Slot 1 (GPIO Matrix)
-#     CMD=19, CLK=18, D0=14, D1=15, D2=16, D3=17
-#     Reset GPIO=54
-#     4-bit bus: enabled
-
-# ── Flash & Partition Table ──
-# Dev board: GD25Q256EYIGR (32MB), Final board: W25Q64JVZPIQ (8MB)
-# Target 8MB (minimum) so same firmware works on both
-CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
-CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-
-# ── Wi-Fi Performance (P4 + C6 co-processor) ──
-CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=16
-CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM=64
-CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM=64
-CONFIG_WIFI_RMT_AMPDU_TX_ENABLED=y
-CONFIG_WIFI_RMT_TX_BA_WIN=32
-CONFIG_WIFI_RMT_AMPDU_RX_ENABLED=y
-CONFIG_WIFI_RMT_RX_BA_WIN=32
-
-# ── WiFi Power Save: DISABLED ──
-# iTWT (Target Wake Time) + modem sleep cause the C6 radio to go
-# dormant after ~seconds, killing the data path while lwIP still
-# shows CONNECTED/BOUND. Disable until esp_hosted iTWT is stable.
-CONFIG_ESP_HOSTED_ENABLE_ITWT=n
-
-# ── lwIP / Network ──
-CONFIG_LWIP_IPV4=y
-CONFIG_LWIP_ICMP=y
-CONFIG_LWIP_RAW=y
-CONFIG_LWIP_DNS_MAX_SERVERS=2
-CONFIG_LWIP_DHCP_DOES_ARP_CHECK=n
-CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP=y
-CONFIG_LWIP_NETIF_LOOPBACK=y
-
-# ── PSRAM (32 MB HEX-mode on ESP32-P4) ──
-CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_HEX=y
-CONFIG_SPIRAM_SPEED_200M=y
-CONFIG_SPIRAM_BOOT_INIT=y
-CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
-CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
-CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
-CONFIG_SPIRAM_MEMTEST=y
-
-# ── TCP/IP Performance (with PSRAM → window scaling enabled) ──
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
-CONFIG_LWIP_TCP_WND_DEFAULT=256000
-CONFIG_LWIP_TCP_RECVMBOX_SIZE=256
-CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
-CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=256
-CONFIG_LWIP_TCP_SACK_OUT=y
-CONFIG_LWIP_WND_SCALE=y
-CONFIG_LWIP_TCP_RCV_SCALE=2
+# PSRAM allocation threshold: only objects < 1 KB go to internal SRAM by default.
+# Objects >= 1 KB (task stacks, lwIP bufs, TinyUSB SW buf, cspot heap, etc.) use PSRAM.
+# DMA-critical paths still use MALLOC_CAP_INTERNAL|DMA explicitly — unaffected.
+# Reduces SRAM fragmentation and leaves more contiguous DMA SRAM headroom.
+# Was 16384 (16 KB): caused large buffers to fragment internal SRAM unnecessarily.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
