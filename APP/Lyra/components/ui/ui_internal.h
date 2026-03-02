@@ -75,10 +75,94 @@ lv_obj_t *ui_settings_create(void);
 void      ui_settings_update(const ui_system_status_t *sys);
 
 /* -----------------------------------------------------------------------
+ * WiFi sub-screen (ui_wifi.c)
+ * ----------------------------------------------------------------------- */
+
+lv_obj_t *ui_wifi_create(void);
+void      ui_wifi_update(const ui_wifi_scan_data_t *data);
+
+/* -----------------------------------------------------------------------
+ * Net Audio sub-screen (ui_net_audio.c)
+ * ----------------------------------------------------------------------- */
+
+lv_obj_t *ui_net_audio_create(void);
+void      ui_net_audio_update(const ui_net_audio_data_t *data);
+
+/* -----------------------------------------------------------------------
+ * USB DAC sub-screen (ui_usb_dac.c)
+ * ----------------------------------------------------------------------- */
+
+lv_obj_t *ui_usb_dac_create(void);
+void      ui_usb_dac_update(const ui_usb_dac_data_t *data);
+
+/* -----------------------------------------------------------------------
+ * EQ sub-screen (ui_eq.c)
+ * ----------------------------------------------------------------------- */
+
+lv_obj_t *ui_eq_create(void);
+void      ui_eq_update(const ui_system_status_t *sys,
+                        const ui_eq_presets_data_t *presets);
+
+/* -----------------------------------------------------------------------
+ * Queue sub-screen (ui_queue.c)
+ * ----------------------------------------------------------------------- */
+
+lv_obj_t *ui_queue_create(void);
+void      ui_queue_update(const ui_queue_data_t *queue,
+                           const ui_now_playing_t *np);
+
+/* -----------------------------------------------------------------------
+ * About sub-screen (ui_about.c)
+ * ----------------------------------------------------------------------- */
+
+lv_obj_t *ui_about_create(void);
+void      ui_about_update(const ui_device_info_t *info);
+
+/* -----------------------------------------------------------------------
+ * Qobuz sub-screen (ui_qobuz.c)
+ * ----------------------------------------------------------------------- */
+
+lv_obj_t *ui_qobuz_create(void);
+void      ui_qobuz_update(const ui_qobuz_data_t *data);
+
+/* -----------------------------------------------------------------------
+ * Subsonic sub-screen (ui_subsonic.c)
+ * ----------------------------------------------------------------------- */
+
+lv_obj_t *ui_subsonic_create(void);
+void      ui_subsonic_update(const ui_subsonic_data_t *data);
+
+/* -----------------------------------------------------------------------
+ * Lock screen (ui_lock.c)
+ * ----------------------------------------------------------------------- */
+
+lv_obj_t *ui_lock_create(void);
+void      ui_lock_update(const ui_now_playing_t *np,
+                          const ui_system_status_t *sys);
+
+/* -----------------------------------------------------------------------
  * Shared nav bar (ui_init.c)
  * ----------------------------------------------------------------------- */
 
 lv_obj_t *ui_create_nav_bar(lv_obj_t *parent, ui_screen_t active_screen);
+
+/* -----------------------------------------------------------------------
+ * Toast notifications (ui_toast.c)
+ * ----------------------------------------------------------------------- */
+
+typedef enum {
+    UI_TOAST_INFO,
+    UI_TOAST_SUCCESS,
+    UI_TOAST_WARNING,
+    UI_TOAST_ERROR,
+} ui_toast_type_t;
+
+/* Show a toast on lv_layer_top(). Replaces any currently visible toast. */
+void ui_toast_show(ui_toast_type_t type, const char *message,
+                   uint32_t duration_ms);
+
+/* Dismiss the current toast immediately (if any). */
+void ui_toast_dismiss(void);
 
 /* -----------------------------------------------------------------------
  * Helpers

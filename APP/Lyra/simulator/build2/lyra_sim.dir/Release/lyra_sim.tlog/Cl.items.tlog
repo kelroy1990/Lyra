@@ -1,0 +1,17 @@
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\sim_main.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\sim_main.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\ui_data_mock.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_data_mock.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_init.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_init.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_theme.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_theme.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_now_playing.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_now_playing.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_browser.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_browser.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_settings.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_settings.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_wifi.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_wifi.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_toast.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_toast.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_net_audio.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_net_audio.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_usb_dac.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_usb_dac.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_eq.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_eq.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_queue.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_queue.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_about.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_about.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_qobuz.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_qobuz.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_subsonic.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_subsonic.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_lock.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Release\ui_lock.obj

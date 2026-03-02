@@ -5,3 +5,11 @@ D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_theme.c;D:\1
 D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_now_playing.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Debug\ui_now_playing.obj
 D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_browser.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Debug\ui_browser.obj
 D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_settings.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Debug\ui_settings.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_wifi.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Debug\ui_wifi.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_toast.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Debug\ui_toast.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_net_audio.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Debug\ui_net_audio.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_usb_dac.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Debug\ui_usb_dac.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_eq.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Debug\ui_eq.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_queue.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Debug\ui_queue.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_about.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Debug\ui_about.obj
+D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_lock.c;D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\build2\lyra_sim.dir\Debug\ui_lock.obj

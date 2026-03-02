@@ -46,6 +46,7 @@
 #define LV_FONT_MONTSERRAT_16   1
 #define LV_FONT_MONTSERRAT_20   1
 #define LV_FONT_MONTSERRAT_28   1
+#define LV_FONT_MONTSERRAT_48   1       /* Lock screen clock */
 #define LV_FONT_DEFAULT         &lv_font_montserrat_14
 
 /* -----------------------------------------------------------------------
@@ -59,17 +60,17 @@
 #define LV_USE_IMAGE            1
 #define LV_USE_LINE             1
 #define LV_USE_ARC              1
-#define LV_USE_TEXTAREA         0
+#define LV_USE_TEXTAREA         1
 #define LV_USE_DROPDOWN         0
 #define LV_USE_ROLLER           0
 #define LV_USE_TABLE            0
 #define LV_USE_CHART            0
 #define LV_USE_CALENDAR         0
-#define LV_USE_KEYBOARD         0
+#define LV_USE_KEYBOARD         1
 #define LV_USE_LIST             1
 #define LV_USE_MSGBOX           0
 #define LV_USE_SPINBOX          0
-#define LV_USE_SPINNER          0
+#define LV_USE_SPINNER          1
 #define LV_USE_TABVIEW          0
 #define LV_USE_TILEVIEW         0
 #define LV_USE_WIN              0

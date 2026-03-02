@@ -221,9 +221,14 @@ void ui_theme_init(void)
     lv_style_set_shadow_width(&style_nav_item, 0);
     lv_style_set_pad_all(&style_nav_item, 8);
 
-    /* Nav item (active) */
+    /* Nav item (active) — gold text + gold underline */
     lv_style_init(&style_nav_item_active);
     lv_style_set_text_color(&style_nav_item_active, COL_ACCENT);
+    lv_style_set_border_side(&style_nav_item_active, LV_BORDER_SIDE_BOTTOM);
+    lv_style_set_border_width(&style_nav_item_active, 3);
+    lv_style_set_border_color(&style_nav_item_active, COL_ACCENT);
+    lv_style_set_border_opa(&style_nav_item_active, LV_OPA_COVER);
+    lv_style_set_pad_bottom(&style_nav_item_active, 6);
 
     /* File list item row */
     lv_style_init(&style_list_item);

@@ -69,6 +69,30 @@ static void on_dsp_toggle(lv_event_t *e)
     ui_cmd_toggle_dsp();
 }
 
+static void on_wifi_click(lv_event_t *e)
+{
+    (void)e;
+    ui_navigate_to(UI_SCREEN_WIFI);
+}
+
+static void on_about_click(lv_event_t *e)
+{
+    (void)e;
+    ui_navigate_to(UI_SCREEN_ABOUT);
+}
+
+static void on_qobuz_click(lv_event_t *e)
+{
+    (void)e;
+    ui_navigate_to(UI_SCREEN_QOBUZ);
+}
+
+static void on_subsonic_click(lv_event_t *e)
+{
+    (void)e;
+    ui_navigate_to(UI_SCREEN_SUBSONIC);
+}
+
 /* -----------------------------------------------------------------------
  * Helpers
  * ----------------------------------------------------------------------- */
@@ -179,6 +203,13 @@ lv_obj_t *ui_settings_create(void)
     lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_add_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
+
+    /* Themed scrollbar: thin, dark, rounded */
+    lv_obj_set_style_bg_color(content, lv_color_hex(0x333333), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(content, (lv_opa_t)120, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(content, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_width(content, 4, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_right(content, 2, LV_PART_SCROLLBAR);
 
     /* ==================================================================
      * EQUALIZER SECTION
@@ -321,7 +352,61 @@ lv_obj_t *ui_settings_create(void)
     create_divider(content);
 
     lbl_wifi_value = create_info_row(content, "WiFi", "Not connected");
+
+    /* Make WiFi row clickable → navigate to WiFi sub-screen */
+    {
+        lv_obj_t *wifi_row = lv_obj_get_parent(lbl_wifi_value);
+        lv_obj_add_flag(wifi_row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(wifi_row, lv_color_hex(0x1A1A1A),
+                                  LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(wifi_row, LV_OPA_COVER, LV_STATE_PRESSED);
+
+        lv_obj_t *chevron = lv_label_create(wifi_row);
+        lv_obj_add_style(chevron, ui_theme_style_info(), 0);
+        lv_obj_set_style_text_color(chevron,
+                                    ui_theme_color_text_secondary(), 0);
+        lv_label_set_text(chevron, LV_SYMBOL_RIGHT);
+
+        lv_obj_add_event_cb(wifi_row, on_wifi_click, LV_EVENT_CLICKED, NULL);
+    }
+
     lbl_bt_value   = create_info_row(content, "Bluetooth", "Not connected");
+
+    /* "Qobuz Hi-Fi >" — navigates to Qobuz sub-screen */
+    {
+        lv_obj_t *qobuz_val = create_info_row(content, "Qobuz Hi-Fi", "");
+        lv_obj_t *qobuz_row = lv_obj_get_parent(qobuz_val);
+        lv_obj_add_flag(qobuz_row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(qobuz_row, lv_color_hex(0x1A1A1A),
+                                  LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(qobuz_row, LV_OPA_COVER, LV_STATE_PRESSED);
+
+        lv_obj_t *qobuz_chevron = lv_label_create(qobuz_row);
+        lv_obj_add_style(qobuz_chevron, ui_theme_style_info(), 0);
+        lv_obj_set_style_text_color(qobuz_chevron,
+                                    ui_theme_color_text_secondary(), 0);
+        lv_label_set_text(qobuz_chevron, LV_SYMBOL_RIGHT);
+
+        lv_obj_add_event_cb(qobuz_row, on_qobuz_click, LV_EVENT_CLICKED, NULL);
+    }
+
+    /* "Subsonic >" — navigates to Subsonic sub-screen */
+    {
+        lv_obj_t *subsonic_val = create_info_row(content, "Subsonic", "");
+        lv_obj_t *subsonic_row = lv_obj_get_parent(subsonic_val);
+        lv_obj_add_flag(subsonic_row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(subsonic_row, lv_color_hex(0x1A1A1A),
+                                  LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(subsonic_row, LV_OPA_COVER, LV_STATE_PRESSED);
+
+        lv_obj_t *subsonic_chevron = lv_label_create(subsonic_row);
+        lv_obj_add_style(subsonic_chevron, ui_theme_style_info(), 0);
+        lv_obj_set_style_text_color(subsonic_chevron,
+                                    ui_theme_color_text_secondary(), 0);
+        lv_label_set_text(subsonic_chevron, LV_SYMBOL_RIGHT);
+
+        lv_obj_add_event_cb(subsonic_row, on_subsonic_click, LV_EVENT_CLICKED, NULL);
+    }
 
     /* ==================================================================
      * ABOUT SECTION
@@ -333,6 +418,24 @@ lv_obj_t *ui_settings_create(void)
     create_info_row(content, "DAC",      "ES9039Q2M");
     create_info_row(content, "Firmware", "1.0.0-dev");
     create_info_row(content, "ESP-IDF",  "v5.5.2");
+
+    /* "System Info >" — navigates to About sub-screen */
+    {
+        lv_obj_t *more_val = create_info_row(content, "System Info", "");
+        lv_obj_t *more_row = lv_obj_get_parent(more_val);
+        lv_obj_add_flag(more_row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(more_row, lv_color_hex(0x1A1A1A),
+                                  LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(more_row, LV_OPA_COVER, LV_STATE_PRESSED);
+
+        lv_obj_t *about_chevron = lv_label_create(more_row);
+        lv_obj_add_style(about_chevron, ui_theme_style_info(), 0);
+        lv_obj_set_style_text_color(about_chevron,
+                                    ui_theme_color_text_secondary(), 0);
+        lv_label_set_text(about_chevron, LV_SYMBOL_RIGHT);
+
+        lv_obj_add_event_cb(more_row, on_about_click, LV_EVENT_CLICKED, NULL);
+    }
 
     /* ==================================================================
      * BOTTOM NAVIGATION BAR (56px)
@@ -384,7 +487,7 @@ void ui_settings_update(const ui_system_status_t *sys)
         lv_label_set_text(lbl_dsp_state, "OFF");
     }
 
-    /* -- WiFi -- */
+    /* -- WiFi (gold=connected, gray=disconnected) -- */
     if (sys->wifi_connected) {
         char wifi_buf[48];
         lv_snprintf(wifi_buf, sizeof(wifi_buf), "%s  %d dBm",
@@ -393,6 +496,9 @@ void ui_settings_update(const ui_system_status_t *sys)
     } else {
         lv_label_set_text(lbl_wifi_value, "Not connected");
     }
+    lv_obj_set_style_text_color(lbl_wifi_value,
+                                sys->wifi_connected ? ui_theme_color_accent()
+                                                    : ui_theme_color_text_secondary(), 0);
 
     /* -- Bluetooth -- */
     if (sys->bt_connected)

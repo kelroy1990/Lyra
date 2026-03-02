@@ -10,6 +10,16 @@ idf_component_register(
         "ui_now_playing.c"
         "ui_browser.c"
         "ui_settings.c"
+        "ui_wifi.c"
+        "ui_toast.c"
+        "ui_net_audio.c"
+        "ui_usb_dac.c"
+        "ui_eq.c"
+        "ui_queue.c"
+        "ui_about.c"
+        "ui_qobuz.c"
+        "ui_subsonic.c"
+        "ui_lock.c"
     INCLUDE_DIRS
         "include"
     PRIV_INCLUDE_DIRS

@@ -32,6 +32,7 @@
 #include "net_audio.h"
 #include "dlna.h"
 #include "spotify.h"
+#include "subsonic.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
@@ -1706,6 +1707,15 @@ static void cdc_task(void *arg)
                         tud_cdc_write_str("  wifi speed [url]  - HTTP download speed test\r\n");
                         tud_cdc_write_str("  wifi stop         - Abort speed test\r\n");
                         tud_cdc_write_str("  ping <host>   - ICMP ping (4 packets)\r\n");
+                        tud_cdc_write_str("Subsonic/Navidrome:\r\n");
+                        tud_cdc_write_str("  subsonic connect <url> <user> <pass>\r\n");
+                        tud_cdc_write_str("  subsonic ping / status\r\n");
+                        tud_cdc_write_str("  subsonic albums [type]  - newest/random/frequent/recent\r\n");
+                        tud_cdc_write_str("  subsonic album <id>     - Show tracks\r\n");
+                        tud_cdc_write_str("  subsonic search <query> - Search music\r\n");
+                        tud_cdc_write_str("  subsonic play <id>      - Play album or track\r\n");
+                        tud_cdc_write_str("  subsonic next / prev    - Playlist navigation\r\n");
+                        tud_cdc_write_str("  subsonic stop\r\n");
                     } else if (strcmp(rx_buf, "flat") == 0) {
                         audio_pipeline_set_preset(PRESET_FLAT);
                         cdc_printf("Preset: Flat (bypass)\r\n");
@@ -1933,6 +1943,10 @@ static void cdc_task(void *arg)
                         const char *sub = rx_buf + 7;
                         while (*sub == ' ') sub++;
                         spotify_handle_cdc_command(sub, cdc_printf);
+                    } else if (strncmp(rx_buf, "subsonic", 8) == 0) {
+                        const char *sub = rx_buf + 8;
+                        while (*sub == ' ') sub++;
+                        subsonic_handle_cdc_command(sub, cdc_printf);
                     } else {
                         cdc_printf("Unknown command. Type 'help'\r\n");
                     }
@@ -2129,6 +2143,7 @@ void app_main(void)
         .process_audio       = audio_pipeline_process,
     };
     spotify_init("Lyra", &spotify_cbs);
+    subsonic_init();
 
     // 10. Network services task — waits for WiFi, then starts DLNA renderer + Spotify
     // Runs at priority 2 (below audio pipeline) on any core

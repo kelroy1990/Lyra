@@ -105,7 +105,7 @@
       <Optimization>Disabled</Optimization>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
-      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <SupportJustMyCode></SupportJustMyCode>
       <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
       <UseFullPaths>false</UseFullPaths>
@@ -183,7 +183,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Optimization>MaxSpeed</Optimization>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <SupportJustMyCode></SupportJustMyCode>
       <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
       <UseFullPaths>false</UseFullPaths>
@@ -263,7 +263,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Optimization>MinSpace</Optimization>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <SupportJustMyCode></SupportJustMyCode>
       <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
       <UseFullPaths>false</UseFullPaths>
@@ -344,7 +344,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Optimization>MaxSpeed</Optimization>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <SupportJustMyCode></SupportJustMyCode>
       <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
       <UseFullPaths>false</UseFullPaths>
@@ -468,6 +468,16 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_now_playing.c" />
     <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_browser.c" />
     <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_settings.c" />
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_wifi.c" />
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_toast.c" />
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_net_audio.c" />
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_usb_dac.c" />
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_eq.c" />
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_queue.c" />
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_about.c" />
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_qobuz.c" />
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_subsonic.c" />
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_lock.c" />
   </ItemGroup>
   <ItemGroup />
   <ItemGroup>

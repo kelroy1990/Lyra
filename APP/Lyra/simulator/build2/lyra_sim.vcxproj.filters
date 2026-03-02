@@ -22,6 +22,36 @@
     <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_settings.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_wifi.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_toast.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_net_audio.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_usb_dac.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_eq.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_queue.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_about.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_qobuz.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_subsonic.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\components\ui\ui_lock.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="D:\1.- Personal Proyects\Firmware Walkman\APP\Lyra\simulator\CMakeLists.txt" />

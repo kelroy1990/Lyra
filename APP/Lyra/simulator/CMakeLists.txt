@@ -2,6 +2,14 @@ cmake_minimum_required(VERSION 3.16)
 project(lyra_sim C)
 
 # -----------------------------------------------------------------------
+# Static CRT — eliminates vcruntime/ucrtbase DLL dependencies so the
+# built exe is portable (only needs SDL2.dll alongside it).
+# -----------------------------------------------------------------------
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+# -----------------------------------------------------------------------
 # SDL2 (find installed via vcpkg or system — must be found before LVGL)
 # -----------------------------------------------------------------------
 
@@ -54,6 +62,16 @@ set(UI_SRCS
     "${UI_DIR}/ui_now_playing.c"
     "${UI_DIR}/ui_browser.c"
     "${UI_DIR}/ui_settings.c"
+    "${UI_DIR}/ui_wifi.c"
+    "${UI_DIR}/ui_toast.c"
+    "${UI_DIR}/ui_net_audio.c"
+    "${UI_DIR}/ui_usb_dac.c"
+    "${UI_DIR}/ui_eq.c"
+    "${UI_DIR}/ui_queue.c"
+    "${UI_DIR}/ui_about.c"
+    "${UI_DIR}/ui_qobuz.c"
+    "${UI_DIR}/ui_subsonic.c"
+    "${UI_DIR}/ui_lock.c"
 )
 
 # -----------------------------------------------------------------------

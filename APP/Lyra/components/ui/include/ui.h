@@ -14,6 +14,15 @@ typedef enum {
     UI_SCREEN_NOW_PLAYING,
     UI_SCREEN_BROWSER,
     UI_SCREEN_SETTINGS,
+    UI_SCREEN_WIFI,
+    UI_SCREEN_NET_AUDIO,
+    UI_SCREEN_USB_DAC,
+    UI_SCREEN_EQ,
+    UI_SCREEN_QUEUE,
+    UI_SCREEN_ABOUT,
+    UI_SCREEN_QOBUZ,
+    UI_SCREEN_SUBSONIC,
+    UI_SCREEN_LOCK,       /* Special: not in normal navigation flow */
     UI_SCREEN_COUNT
 } ui_screen_t;
 
@@ -39,6 +48,21 @@ void ui_update(void);
 void ui_navigate_to(ui_screen_t screen);
 
 /*
+ * Navigate back to the previous screen (before the current one).
+ * Falls back to Settings if there is no meaningful previous screen.
+ */
+void ui_navigate_back(void);
+
+/*
  * Get the currently active screen.
  */
 ui_screen_t ui_get_current_screen(void);
+
+/*
+ * Lock / unlock the screen.
+ * Lock saves current screen and shows lock screen (fade in).
+ * Unlock restores the previous screen (fade out).
+ */
+void ui_lock(void);
+void ui_unlock(void);
+bool ui_is_locked(void);

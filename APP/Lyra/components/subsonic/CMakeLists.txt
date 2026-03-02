@@ -1,0 +1,15 @@
+idf_component_register(
+    SRCS
+        "subsonic.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_REQUIRES
+        esp_http_client
+        json
+        mbedtls
+        net_audio
+        lwip
+        log
+        freertos
+        esp_timer
+)

@@ -51,12 +51,25 @@ int main(int argc, char *argv[])
     ui_init();
 
     printf("UI initialized. Running main loop...\n");
+    printf("  Press 'P' to toggle lock/unlock (simulates power button)\n");
 
     /* Main loop */
     uint32_t last_update = lv_tick_get();
 
     while (1) {
         uint32_t sleep_ms = lv_timer_handler();
+
+        /* Poll SDL events for 'P' key (power button simulation) */
+        SDL_Event ev;
+        while (SDL_PeepEvents(&ev, 1, SDL_GETEVENT,
+                               SDL_KEYDOWN, SDL_KEYDOWN)) {
+            if (ev.key.keysym.sym == SDLK_p && !ev.key.repeat) {
+                if (ui_is_locked())
+                    ui_unlock();
+                else
+                    ui_lock();
+            }
+        }
 
         /* Periodically refresh UI data */
         uint32_t now = lv_tick_get();
