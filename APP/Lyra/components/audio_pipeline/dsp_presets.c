@@ -7,95 +7,43 @@
 // These coefficients are pre-computed using RBJ Audio EQ Cookbook formulas
 // to avoid expensive sin/cos/pow/sqrt calculations during preset loading.
 // Result: ~230 cycles saved per filter on preset change (instant switching)
+//
+// Format: {b0, b1, b2, a1, a2} — esp-dsp compatible, normalized (a0=1)
 //--------------------------------------------------------------------+
 
-// Rock: Lowshelf @ 100Hz, +6dB, Q=0.7, fs=48000 (coeffs not used — calculated dynamically)
+// Rock: Lowshelf @ 100Hz, +6dB, Q=0.7, fs=48000
 static const biquad_coeffs_t rock_coeffs_48k[1] = {
-    {
-        .b0 =  2.006588f,
-        .b1 = -3.973317f,
-        .b2 =  1.973094f,
-        .a1 = -1.986862f,
-        .a2 =  0.986949f,
-    }
+    {.coef = { 2.006588f, -3.973317f,  1.973094f, -1.986862f,  0.986949f}}
 };
 
 // Jazz: Lowshelf+Peak+Highshelf @ 48kHz
 static const biquad_coeffs_t jazz_coeffs_48k[3] = {
     // Lowshelf @ 100Hz, +2dB, Q=0.7
-    {
-        .b0 =  1.002662f,
-        .b1 = -1.991437f,
-        .b2 =  0.991806f,
-        .a1 = -1.993569f,
-        .a2 =  0.994337f,
-    },
+    {.coef = { 1.002662f, -1.991437f,  0.991806f, -1.993569f,  0.994337f}},
     // Peak @ 1000Hz, -1dB, Q=1.0
-    {
-        .b0 =  0.995604f,
-        .b1 = -1.868161f,
-        .b2 =  0.877951f,
-        .a1 = -1.868161f,
-        .a2 =  0.873555f,
-    },
+    {.coef = { 0.995604f, -1.868161f,  0.877951f, -1.868161f,  0.873555f}},
     // Highshelf @ 8000Hz, +1dB, Q=0.7
-    {
-        .b0 =  1.094208f,
-        .b1 = -1.640224f,
-        .b2 =  0.653686f,
-        .a1 = -1.651894f,
-        .a2 =  0.736224f,
-    }
+    {.coef = { 1.094208f, -1.640224f,  0.653686f, -1.651894f,  0.736224f}}
 };
 
 // Classical: Lowshelf+Peak+Highshelf @ 48kHz
 static const biquad_coeffs_t classical_coeffs_48k[3] = {
     // Lowshelf @ 120Hz, +3dB, Q=0.7
-    {
-        .b0 =  1.004261f,
-        .b1 = -1.988327f,
-        .b2 =  0.987252f,
-        .a1 = -1.992588f,
-        .a2 =  0.992699f,
-    },
+    {.coef = { 1.004261f, -1.988327f,  0.987252f, -1.992588f,  0.992699f}},
     // Peak @ 1500Hz, -2dB, Q=1.0
-    {
-        .b0 =  0.991403f,
-        .b1 = -1.754809f,
-        .b2 =  0.772792f,
-        .a1 = -1.754809f,
-        .a2 =  0.764195f,
-    },
+    {.coef = { 0.991403f, -1.754809f,  0.772792f, -1.754809f,  0.764195f}},
     // Highshelf @ 6000Hz, +2dB, Q=0.7
-    {
-        .b0 =  1.150629f,
-        .b1 = -1.694753f,
-        .b2 =  0.631890f,
-        .a1 = -1.718018f,
-        .a2 =  0.769254f,
-    }
+    {.coef = { 1.150629f, -1.694753f,  0.631890f, -1.718018f,  0.769254f}}
 };
 
 // Bass Boost: Lowshelf @ 80Hz, +8dB, Q=0.7, fs=48000
 static const biquad_coeffs_t bass_boost_coeffs_48k[1] = {
-    {
-        .b0 =  1.672887f,
-        .b1 = -3.315762f,
-        .b2 =  1.649156f,
-        .a1 = -1.990281f,
-        .a2 =  0.990563f,
-    }
+    {.coef = { 1.672887f, -3.315762f,  1.649156f, -1.990281f,  0.990563f}}
 };
 
 // Test Extreme: Peak @ 1000Hz, +20dB, Q=2.0, fs=48000
 static const biquad_coeffs_t test_extreme_coeffs_48k[1] = {
-    {
-        .b0 =  1.328084f,
-        .b1 = -1.868161f,
-        .b2 =  0.550471f,
-        .a1 = -1.868161f,
-        .a2 =  0.878555f,
-    }
+    {.coef = { 1.328084f, -1.868161f,  0.550471f, -1.868161f,  0.878555f}}
 };
 
 //--------------------------------------------------------------------+
@@ -120,7 +68,7 @@ static const preset_config_t preset_rock = {
         {.type = BIQUAD_LOWSHELF,  .freq = 100.0f,   .gain = 6.0f, .q = 0.7f, .sample_rate = 48000},
     },
     .enable_crossfeed = false,
-    .coeffs_48k = rock_coeffs_48k,  // Pre-calculated for instant loading
+    .coeffs_48k = rock_coeffs_48k,
 };
 
 // Preset 2: Jazz (Smooth: +2dB bass, -1dB mid, +1dB treble)

@@ -22,16 +22,16 @@ void biquad_init(biquad_filter_t *filter, const biquad_params_t *params)
 
 void biquad_reset(biquad_filter_t *filter)
 {
-    // Clear state variables (keep coefficients)
-    memset(filter->x1, 0, sizeof(filter->x1));
-    memset(filter->x2, 0, sizeof(filter->x2));
-    memset(filter->y1, 0, sizeof(filter->y1));
-    memset(filter->y2, 0, sizeof(filter->y2));
+    // Clear DFII-T state variables (keep coefficients)
+    memset(filter->w, 0, sizeof(filter->w));
 }
 
 //--------------------------------------------------------------------+
 // Coefficient Calculation (RBJ Audio EQ Cookbook)
 // https://webaudio.github.io/Audio-EQ-Cookbook/audio-eq-cookbook.html
+//
+// Output: filter->coef[5] = {b0, b1, b2, a1, a2} normalized (a0=1)
+// Compatible with esp-dsp dsps_biquad_f32().
 //--------------------------------------------------------------------+
 
 void biquad_calculate_coeffs(biquad_filter_t *filter, const biquad_params_t *params)
@@ -126,99 +126,11 @@ void biquad_calculate_coeffs(biquad_filter_t *filter, const biquad_params_t *par
             break;
     }
 
-    // Normalize coefficients (a0 = 1)
-    filter->b0 = b0 / a0;
-    filter->b1 = b1 / a0;
-    filter->b2 = b2 / a0;
-    filter->a1 = a1 / a0;
-    filter->a2 = a2 / a0;
-}
-
-//--------------------------------------------------------------------+
-// Audio Processing (Direct Form I with FPU)
-//--------------------------------------------------------------------+
-
-// Mark as hot path for aggressive optimization
-__attribute__((hot, always_inline))
-static inline void biquad_process_frame_opt(biquad_filter_t *restrict filter,
-                                            float *restrict left,
-                                            float *restrict right)
-{
-    // OPTIMIZED: Process both channels with improved instruction-level parallelism
-    // The compiler can better vectorize this pattern with independent operations
-
-    // Load inputs
-    float x_L = *left;
-    float x_R = *right;
-
-    // Load state (can be done in parallel)
-    float x1_L = filter->x1[0];
-    float x1_R = filter->x1[1];
-    float x2_L = filter->x2[0];
-    float x2_R = filter->x2[1];
-    float y1_L = filter->y1[0];
-    float y1_R = filter->y1[1];
-    float y2_L = filter->y2[0];
-    float y2_R = filter->y2[1];
-
-    // Load coefficients (shared between channels)
-    float b0 = filter->b0;
-    float b1 = filter->b1;
-    float b2 = filter->b2;
-    float a1 = filter->a1;
-    float a2 = filter->a2;
-
-    // Compute outputs (FPU can pipeline these operations)
-    // Left and right are independent, allowing parallel execution
-    float y_L = b0 * x_L + b1 * x1_L + b2 * x2_L - a1 * y1_L - a2 * y2_L;
-    float y_R = b0 * x_R + b1 * x1_R + b2 * x2_R - a1 * y1_R - a2 * y2_R;
-
-    // Update state (can be done in parallel)
-    filter->x2[0] = x1_L;
-    filter->x2[1] = x1_R;
-    filter->x1[0] = x_L;
-    filter->x1[1] = x_R;
-    filter->y2[0] = y1_L;
-    filter->y2[1] = y1_R;
-    filter->y1[0] = y_L;
-    filter->y1[1] = y_R;
-
-    // Write outputs
-    *left = y_L;
-    *right = y_R;
-}
-
-// Public wrapper function (for API compatibility)
-void biquad_process_frame(biquad_filter_t *filter, float *left, float *right)
-{
-    biquad_process_frame_opt(filter, left, right);
-}
-
-void biquad_process(biquad_filter_t *filter, audio_buffer_t *buffer)
-{
-    // Process interleaved stereo (L, R, L, R, ...)
-    for (uint32_t frame = 0; frame < buffer->frames; frame++) {
-        uint32_t idx = frame * 2;  // stereo
-        biquad_process_frame(filter, &buffer->data[idx], &buffer->data[idx + 1]);
-    }
-}
-
-//--------------------------------------------------------------------+
-// Fast Coefficient Updates
-//--------------------------------------------------------------------+
-
-void biquad_set_frequency(biquad_filter_t *filter, float freq, uint32_t sample_rate)
-{
-    // TODO: Implement fast frequency update without full recalculation
-    // For now, store params and recalculate
-    (void)filter;
-    (void)freq;
-    (void)sample_rate;
-}
-
-void biquad_set_gain(biquad_filter_t *filter, float gain_db)
-{
-    // TODO: Implement fast gain update for peak/shelf filters
-    (void)filter;
-    (void)gain_db;
+    // Normalize coefficients (a0 = 1) and store in esp-dsp format
+    float inv_a0 = 1.0f / a0;
+    filter->coef[0] = b0 * inv_a0;  // b0
+    filter->coef[1] = b1 * inv_a0;  // b1
+    filter->coef[2] = b2 * inv_a0;  // b2
+    filter->coef[3] = a1 * inv_a0;  // a1
+    filter->coef[4] = a2 * inv_a0;  // a2
 }

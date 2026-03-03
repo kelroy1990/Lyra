@@ -72,6 +72,16 @@ bool audio_pipeline_is_enabled(void)
     return !g_dsp_chain.bypass;
 }
 
+void audio_pipeline_set_limiter_mode(dsp_limiter_mode_t mode)
+{
+    dsp_chain_set_limiter_mode(&g_dsp_chain, mode);
+}
+
+dsp_limiter_mode_t audio_pipeline_get_limiter_mode(void)
+{
+    return dsp_chain_get_limiter_mode(&g_dsp_chain);
+}
+
 //--------------------------------------------------------------------+
 // Format Updates
 //--------------------------------------------------------------------+

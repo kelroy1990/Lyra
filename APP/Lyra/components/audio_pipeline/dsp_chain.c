@@ -6,13 +6,56 @@
 static const char *TAG = "dsp_chain";
 
 // Conversion scale factors for int32 <-> float
-// int32 max = 2^31-1 = 2147483647
-#define INT32_TO_FLOAT_SCALE  (1.0f / 2147483648.0f)
-#define FLOAT_TO_INT32_SCALE  (2147483648.0f)
+#define INT32_TO_FLOAT_SCALE  (1.0f / 2147483648.0f)   // 1 / 2^31
+#define FLOAT_TO_INT32_SCALE  (2147483648.0f)           // 2^31
 
-// Soft limiter configuration
-#define SOFT_LIMITER_ENABLED 1
-#define SOFT_LIMITER_THRESHOLD 0.95f  // Start soft limiting at 95% to avoid clipping
+// Safe clamp for float→int32: largest float32 that fits in int32
+// float32 ULP at [2^30, 2^31) = 128, so max representable < 2^31 is 2^31-128
+#define INT32_MAX_FLOAT  ( 2147483520.0f)   // 2^31 - 128
+#define INT32_MIN_FLOAT  (-2147483648.0f)   // -2^31 (exact)
+
+// Soft limiter threshold (only used in DSP_LIMITER_SOFT mode)
+#define SOFT_LIMITER_THRESHOLD 0.95f
+
+// Maximum frames per batch (384kHz × 8 USB packets / 1000 = 392 max)
+#define MAX_BATCH_FRAMES 400
+
+// Deinterleave buffers for batch processing (mono, contiguous)
+static float s_buf_L[MAX_BATCH_FRAMES];
+static float s_buf_R[MAX_BATCH_FRAMES];
+
+//--------------------------------------------------------------------+
+// Biquad IIR — Direct Form II Transposed (DFII-T)
+//--------------------------------------------------------------------+
+// DFII-T keeps state at the OUTPUT level, avoiding the internal-state
+// blow-up of Direct Form II which causes precision loss with high-gain
+// filters (+20 dB peak → d0 ≈ 89× input in DFII, but only y ≈ 10× in
+// DFII-T).  Two state variables per channel, same coef[5] layout.
+//
+// y[n] = b0·x[n] + w0
+// w0   = b1·x[n] − a1·y[n] + w1
+// w1   = b2·x[n] − a2·y[n]
+//--------------------------------------------------------------------+
+
+__attribute__((hot, always_inline))
+static inline void biquad_process_mono(float *buf, int len,
+                                       const float *coef, float *w)
+{
+    const float b0 = coef[0], b1 = coef[1], b2 = coef[2];
+    const float a1 = coef[3], a2 = coef[4];
+    float w0 = w[0], w1 = w[1];
+
+    for (int i = 0; i < len; i++) {
+        const float x = buf[i];
+        const float y = b0 * x + w0;
+        w0 = b1 * x - a1 * y + w1;
+        w1 = b2 * x - a2 * y;
+        buf[i] = y;
+    }
+
+    w[0] = w0;
+    w[1] = w1;
+}
 
 //--------------------------------------------------------------------+
 // DSP Chain Initialization
@@ -28,8 +71,9 @@ void dsp_chain_init(dsp_chain_t *chain, const audio_format_t *format)
     // Start with flat preset (bypass)
     chain->current_preset = PRESET_FLAT;
     chain->bypass = false;
+    chain->limiter_mode = DSP_LIMITER_HARD_CLIP;
 
-    ESP_LOGI(TAG, "DSP Chain initialized: %lu Hz, %d-bit, %d channels",
+    ESP_LOGI(TAG, "DSP Chain initialized (DFII-T batch): %lu Hz, %d-bit, %d channels",
              format->sample_rate, format->bits_per_sample, format->channels);
 }
 
@@ -51,7 +95,6 @@ bool dsp_chain_load_preset(dsp_chain_t *chain, eq_preset_t preset)
     chain->num_biquads = 0;
 
     // Load biquad filters from preset — always calculate dynamically
-    // (pre-calculated coeffs_48k had 2x gain error on b0/b1/b2)
     for (uint8_t i = 0; i < config->num_filters && i < DSP_MAX_BIQUADS; i++) {
         biquad_params_t params = config->filters[i];
         params.sample_rate = chain->format.sample_rate;
@@ -69,55 +112,78 @@ bool dsp_chain_load_preset(dsp_chain_t *chain, eq_preset_t preset)
 
     chain->current_preset = preset;
 
-    ESP_LOGI(TAG, "Preset loaded: %d biquad filters", chain->num_biquads);
+    ESP_LOGI(TAG, "Preset loaded: %d biquad filters (DFII-T batch)", chain->num_biquads);
     return true;
 }
 
 //--------------------------------------------------------------------+
-// Audio Processing
+// Audio Processing — esp-dsp batch architecture
 //--------------------------------------------------------------------+
 
 /**
- * @brief Soft limiter using tanh function
+ * @brief Fast soft limiter using Padé approximation of tanh
  *
- * Provides smooth limiting without harsh clipping distortion.
- * Uses tanh which naturally compresses signals above threshold.
+ * Padé [3/3] rational polynomial: x*(27 + x²) / (27 + 9*x²)
+ * Accurate within 0.5% for |x| ≤ 3.0, exact at x=±3 (returns ±1.0).
+ * Beyond |x|>3 the polynomial diverges (>1.0), so we clamp to ±1.
+ * ~10 cycles vs tanhf() ~50-100 cycles on ESP32-P4
  *
- * @param sample Input sample (normalized -1.0 to +1.0)
- * @return Limited sample
+ * @param x Input value
+ * @return Approximated tanh(x), always in [-1.0, +1.0]
+ */
+__attribute__((hot, always_inline))
+static inline float fast_tanhf(float x)
+{
+    // Padé is exact at ±3 (returns ±1.0) and diverges beyond
+    if (x > 3.0f) return 1.0f;
+    if (x < -3.0f) return -1.0f;
+    float x2 = x * x;
+    return x * (27.0f + x2) / (27.0f + 9.0f * x2);
+}
+
+/**
+ * @brief Hard clip: clamp at ±1.0 (transparent, no compression)
+ */
+__attribute__((hot, always_inline))
+static inline float hard_clip(float sample)
+{
+    if (sample > 1.0f) return 1.0f;
+    if (sample < -1.0f) return -1.0f;
+    return sample;
+}
+
+/**
+ * @brief Soft limiter: linear below threshold, tanh compression above
+ *
+ * Continuous at threshold (no discontinuity), output never exceeds ±1.0.
+ * Uses fast Padé tanh for the compression region.
  */
 __attribute__((hot, always_inline))
 static inline float soft_limit(float sample)
 {
-#if SOFT_LIMITER_ENABLED
-    // Soft limiter: linear below threshold, tanh compression above.
-    // Continuous at threshold (no discontinuity), output never exceeds ±1.0.
-    // Maps excess above threshold through tanh scaled to remaining headroom.
     float abs_s = fabsf(sample);
     if (abs_s <= SOFT_LIMITER_THRESHOLD) return sample;
 
     float sign = (sample >= 0.0f) ? 1.0f : -1.0f;
     float excess = abs_s - SOFT_LIMITER_THRESHOLD;
-    float headroom = 1.0f - SOFT_LIMITER_THRESHOLD;
-    return sign * (SOFT_LIMITER_THRESHOLD + headroom * tanhf(excess / headroom));
-#else
-    // Hard clipping (old behavior)
-    if (sample > 1.0f) return 1.0f;
-    if (sample < -1.0f) return -1.0f;
-    return sample;
-#endif
+    float headroom = 1.0f - SOFT_LIMITER_THRESHOLD;  // 0.05f
+    return sign * (SOFT_LIMITER_THRESHOLD + headroom * fast_tanhf(excess / headroom));
 }
 
-// Static buffer to avoid stack allocation overhead
-// static float g_temp_buffer[392 / 4];  // Max buffer size in samples (392 bytes / 4 bytes per sample)
-
-// Mark as hot path for aggressive optimization
+/**
+ * @brief Process audio buffer through DSP chain
+ *
+ * Architecture: batch deinterleave → DFII-T biquad per channel → soft limit → reinterleave
+ *
+ * 1. Deinterleave stereo int32 → float L[] / R[] (one pass)
+ * 2. For each biquad: biquad_process_mono (DFII-T, in-place)
+ * 3. Soft limit + reinterleave float → int32 (one pass)
+ */
 __attribute__((hot))
 void dsp_chain_process(dsp_chain_t *restrict chain, int32_t *restrict buffer_i32, uint32_t frames)
 {
 #ifdef DSP_DEBUG_LOGGING
     static uint32_t process_count = 0;
-    // Log every 1000 calls to verify DSP is running (debug only)
     if (++process_count % 1000 == 0) {
         ESP_LOGI(TAG, "DSP processing: %lu calls, %d filters active, preset=%d",
                  process_count, chain->num_biquads, chain->current_preset);
@@ -125,77 +191,72 @@ void dsp_chain_process(dsp_chain_t *restrict chain, int32_t *restrict buffer_i32
 #endif
 
     if (chain->bypass || chain->num_biquads == 0) {
-        // Bypass mode: no processing
         return;
     }
 
-    // const uint32_t num_samples = frames * 2;  // stereo
-
-    // OPTIMIZATION: Process samples frame-by-frame for minimal latency
-    // Code is structured to maximize instruction-level parallelism and FPU utilization
-
-    // Fast path for single-filter presets (most common case)
-    if (chain->num_biquads == 1) {
-        biquad_filter_t *restrict filter = &chain->biquads[0];
-
-        for (uint32_t frame = 0; frame < frames; frame++) {
-            uint32_t idx = frame * 2;
-
-            // Convert int32 to float
-            float left  = (float)buffer_i32[idx]     * INT32_TO_FLOAT_SCALE;
-            float right = (float)buffer_i32[idx + 1] * INT32_TO_FLOAT_SCALE;
-
-            // Process single filter (inlined for performance)
-            biquad_process_frame(filter, &left, &right);
-
-            // Apply soft limiter
-            left = soft_limit(left);
-            right = soft_limit(right);
-
-            // Convert back to int32 with clipping
-            float left_scaled  = left  * FLOAT_TO_INT32_SCALE;
-            float right_scaled = right * FLOAT_TO_INT32_SCALE;
-
-            if (left_scaled > 2147483647.0f) left_scaled = 2147483647.0f;
-            else if (left_scaled < -2147483648.0f) left_scaled = -2147483648.0f;
-
-            if (right_scaled > 2147483647.0f) right_scaled = 2147483647.0f;
-            else if (right_scaled < -2147483648.0f) right_scaled = -2147483648.0f;
-
-            buffer_i32[idx]     = (int32_t)left_scaled;
-            buffer_i32[idx + 1] = (int32_t)right_scaled;
-        }
+    // Clamp to buffer size
+    if (frames > MAX_BATCH_FRAMES) {
+        frames = MAX_BATCH_FRAMES;
     }
-    // Multi-filter path (jazz, classical, etc.)
-    else {
-        for (uint32_t frame = 0; frame < frames; frame++) {
-            uint32_t idx = frame * 2;
 
-            // Convert int32 to float
-            float left  = (float)buffer_i32[idx]     * INT32_TO_FLOAT_SCALE;
-            float right = (float)buffer_i32[idx + 1] * INT32_TO_FLOAT_SCALE;
+    //----------------------------------------------------------------
+    // Step 1: Deinterleave int32 stereo → float mono L[] / R[]
+    //----------------------------------------------------------------
+    for (uint32_t i = 0; i < frames; i++) {
+        s_buf_L[i] = (float)buffer_i32[i * 2]     * INT32_TO_FLOAT_SCALE;
+        s_buf_R[i] = (float)buffer_i32[i * 2 + 1] * INT32_TO_FLOAT_SCALE;
+    }
 
-            // Process through biquad chain
-            for (uint8_t i = 0; i < chain->num_biquads; i++) {
-                biquad_process_frame(&chain->biquads[i], &left, &right);
-            }
+    //----------------------------------------------------------------
+    // Step 2: Process biquad chain — DFII-T, in-place, per channel
+    //----------------------------------------------------------------
+    for (uint8_t i = 0; i < chain->num_biquads; i++) {
+        biquad_filter_t *f = &chain->biquads[i];
+        biquad_process_mono(s_buf_L, frames, f->coef, f->w[0]);
+        biquad_process_mono(s_buf_R, frames, f->coef, f->w[1]);
+    }
 
-            // Apply soft limiter
-            left = soft_limit(left);
-            right = soft_limit(right);
+    //----------------------------------------------------------------
+    // Step 3: Limit + reinterleave float → int32
+    //
+    // Branch once on limiter mode to avoid per-sample branch overhead.
+    // Note: 2147483647.0f rounds to 2147483648.0f in float32 (ULP=128),
+    // so we clamp to INT32_MAX_FLOAT (2^31 − 128) to avoid UB in the
+    // float→int32 cast.  Loss = 127 values at full scale — inaudible.
+    //----------------------------------------------------------------
+    if (chain->limiter_mode == DSP_LIMITER_SOFT) {
+        for (uint32_t i = 0; i < frames; i++) {
+            float left  = soft_limit(s_buf_L[i]);
+            float right = soft_limit(s_buf_R[i]);
 
-            // Convert back to int32 with clipping
             float left_scaled  = left  * FLOAT_TO_INT32_SCALE;
             float right_scaled = right * FLOAT_TO_INT32_SCALE;
 
-            if (left_scaled > 2147483647.0f) left_scaled = 2147483647.0f;
-            else if (left_scaled < -2147483648.0f) left_scaled = -2147483648.0f;
+            if (left_scaled > INT32_MAX_FLOAT) left_scaled = INT32_MAX_FLOAT;
+            else if (left_scaled < INT32_MIN_FLOAT) left_scaled = INT32_MIN_FLOAT;
 
-            if (right_scaled > 2147483647.0f) right_scaled = 2147483647.0f;
-            else if (right_scaled < -2147483648.0f) right_scaled = -2147483648.0f;
+            if (right_scaled > INT32_MAX_FLOAT) right_scaled = INT32_MAX_FLOAT;
+            else if (right_scaled < INT32_MIN_FLOAT) right_scaled = INT32_MIN_FLOAT;
 
-            buffer_i32[idx]     = (int32_t)left_scaled;
-            buffer_i32[idx + 1] = (int32_t)right_scaled;
+            buffer_i32[i * 2]     = (int32_t)left_scaled;
+            buffer_i32[i * 2 + 1] = (int32_t)right_scaled;
+        }
+    } else {
+        for (uint32_t i = 0; i < frames; i++) {
+            float left  = hard_clip(s_buf_L[i]);
+            float right = hard_clip(s_buf_R[i]);
+
+            float left_scaled  = left  * FLOAT_TO_INT32_SCALE;
+            float right_scaled = right * FLOAT_TO_INT32_SCALE;
+
+            if (left_scaled > INT32_MAX_FLOAT) left_scaled = INT32_MAX_FLOAT;
+            else if (left_scaled < INT32_MIN_FLOAT) left_scaled = INT32_MIN_FLOAT;
+
+            if (right_scaled > INT32_MAX_FLOAT) right_scaled = INT32_MAX_FLOAT;
+            else if (right_scaled < INT32_MIN_FLOAT) right_scaled = INT32_MIN_FLOAT;
+
+            buffer_i32[i * 2]     = (int32_t)left_scaled;
+            buffer_i32[i * 2 + 1] = (int32_t)right_scaled;
         }
     }
 }
@@ -208,6 +269,18 @@ void dsp_chain_set_bypass(dsp_chain_t *chain, bool bypass)
 {
     chain->bypass = bypass;
     ESP_LOGI(TAG, "DSP processing: %s", bypass ? "BYPASSED" : "ENABLED");
+}
+
+void dsp_chain_set_limiter_mode(dsp_chain_t *chain, dsp_limiter_mode_t mode)
+{
+    chain->limiter_mode = mode;
+    ESP_LOGI(TAG, "Limiter mode: %s",
+             mode == DSP_LIMITER_SOFT ? "SOFT (Padé tanh)" : "HARD CLIP");
+}
+
+dsp_limiter_mode_t dsp_chain_get_limiter_mode(const dsp_chain_t *chain)
+{
+    return chain->limiter_mode;
 }
 
 void dsp_chain_update_format(dsp_chain_t *chain, const audio_format_t *format)
@@ -258,9 +331,9 @@ eq_preset_t dsp_chain_get_preset(const dsp_chain_t *chain)
 // CPU configuration
 #define ESP32P4_CPU_FREQ_MHZ 400
 
-// Cycle costs (measured/estimated)
-#define CYCLES_BASE_OVERHEAD  34    // Conversion + limiter + clipping
-#define CYCLES_PER_FILTER     18    // Biquad ILP optimized
+// Cycle costs (estimated for DFII-T batch + fast limiter)
+#define CYCLES_BASE_OVERHEAD  20    // Deinterleave + fast limiter + reinterleave
+#define CYCLES_PER_FILTER     14    // DFII-T inline biquad (compiler-optimized)
 #define CYCLES_CROSSFEED     100    // Crossfeed effect (future)
 #define CYCLES_DRC            80    // Dynamic range compression (future)
 

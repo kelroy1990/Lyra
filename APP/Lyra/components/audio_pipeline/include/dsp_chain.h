@@ -14,6 +14,14 @@ extern "C" {
 //--------------------------------------------------------------------+
 
 /**
+ * @brief Limiter mode for DSP output stage
+ */
+typedef enum {
+    DSP_LIMITER_HARD_CLIP = 0,   ///< Clamp at ±1.0 — transparent, no compression (default)
+    DSP_LIMITER_SOFT,            ///< Padé tanh compression above threshold — smooth but compresses dynamics
+} dsp_limiter_mode_t;
+
+/**
  * @brief Maximum number of biquad filters in chain (hardware limit)
  */
 #define DSP_MAX_BIQUADS 10
@@ -62,6 +70,9 @@ typedef struct {
 
     // Bypass mode
     bool bypass;
+
+    // Limiter mode
+    dsp_limiter_mode_t limiter_mode;
 
     // Statistics
     dsp_stats_t stats;
@@ -142,6 +153,22 @@ const dsp_stats_t *dsp_chain_get_stats(const dsp_chain_t *chain);
  * @return Current preset enum
  */
 eq_preset_t dsp_chain_get_preset(const dsp_chain_t *chain);
+
+/**
+ * @brief Set limiter mode
+ *
+ * @param chain Pointer to DSP chain
+ * @param mode DSP_LIMITER_HARD_CLIP (default) or DSP_LIMITER_SOFT
+ */
+void dsp_chain_set_limiter_mode(dsp_chain_t *chain, dsp_limiter_mode_t mode);
+
+/**
+ * @brief Get current limiter mode
+ *
+ * @param chain Pointer to DSP chain
+ * @return Current limiter mode
+ */
+dsp_limiter_mode_t dsp_chain_get_limiter_mode(const dsp_chain_t *chain);
 
 //--------------------------------------------------------------------+
 // CPU Budget Management API

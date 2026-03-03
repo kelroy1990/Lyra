@@ -32,14 +32,10 @@ typedef enum {
 #define MAX_BIQUADS_PER_PRESET 10
 
 /**
- * @brief Pre-calculated biquad coefficients (for fast preset loading)
- *
- * Coefficients are pre-computed for specific sample rates to avoid
- * expensive sin/cos/pow/sqrt calculations during preset changes.
+ * @brief Pre-calculated biquad coefficients (esp-dsp compatible)
  */
 typedef struct {
-    float b0, b1, b2;  ///< Feedforward coefficients
-    float a1, a2;      ///< Feedback coefficients (a0 normalized to 1)
+    float coef[5];  ///< {b0, b1, b2, a1, a2}
 } biquad_coeffs_t;
 
 /**
@@ -60,35 +56,9 @@ typedef struct {
 // API Functions
 //--------------------------------------------------------------------+
 
-/**
- * @brief Get preset configuration by index
- *
- * @param preset Preset enum
- * @return Pointer to preset configuration (const)
- */
 const preset_config_t *preset_get_config(eq_preset_t preset);
-
-/**
- * @brief Get preset name
- *
- * @param preset Preset enum
- * @return Preset name string
- */
 const char *preset_get_name(eq_preset_t preset);
-
-/**
- * @brief Get preset description
- *
- * @param preset Preset enum
- * @return Preset description string
- */
 const char *preset_get_description(eq_preset_t preset);
-
-/**
- * @brief Get total number of presets
- *
- * @return Number of available presets
- */
 uint8_t preset_get_count(void);
 
 #ifdef __cplusplus

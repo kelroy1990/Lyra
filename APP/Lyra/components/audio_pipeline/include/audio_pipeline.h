@@ -56,6 +56,23 @@ void audio_pipeline_set_enabled(bool enable);
 bool audio_pipeline_is_enabled(void);
 
 /**
+ * @brief Set limiter mode
+ *
+ * Hard clip (default): clamp at ±1.0 — transparent, no compression artifacts.
+ * Soft limiter: Padé tanh compression — smooth but compresses dynamics.
+ *
+ * @param mode DSP_LIMITER_HARD_CLIP or DSP_LIMITER_SOFT
+ */
+void audio_pipeline_set_limiter_mode(dsp_limiter_mode_t mode);
+
+/**
+ * @brief Get current limiter mode
+ *
+ * @return Current limiter mode
+ */
+dsp_limiter_mode_t audio_pipeline_get_limiter_mode(void);
+
+/**
  * @brief Update audio format (called when USB format changes)
  *
  * @param sample_rate New sample rate (Hz)
