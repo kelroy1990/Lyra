@@ -17,6 +17,12 @@ typedef enum {
     PLAYER_STATE_PAUSED,
 } player_state_t;
 
+typedef enum {
+    REPEAT_OFF = 0,   // Stop at end of playlist
+    REPEAT_ONE,       // Repeat current track
+    REPEAT_ALL,       // Loop entire playlist
+} repeat_mode_t;
+
 //--------------------------------------------------------------------+
 // Audio source enum (mirrors main/audio_source.h to avoid dependency)
 //--------------------------------------------------------------------+
@@ -57,6 +63,8 @@ typedef struct {
     uint32_t remaining_ms;
     int      track_index;
     int      track_count;
+    bool          shuffle_enabled;
+    repeat_mode_t repeat_mode;
 } player_status_t;
 
 //--------------------------------------------------------------------+
@@ -86,6 +94,20 @@ void sd_player_cmd_stop(void);
 void sd_player_cmd_next(void);
 void sd_player_cmd_prev(void);
 void sd_player_cmd_seek(uint32_t seconds);
+void sd_player_cmd_set_shuffle(bool enabled);
+void sd_player_cmd_set_repeat(repeat_mode_t mode);
+bool sd_player_get_shuffle(void);
+repeat_mode_t sd_player_get_repeat(void);
+
+// EOF callback: called when a track ends or errors in single-track mode.
+// error=false → normal EOF, error=true → decode error.
+typedef void (*sd_player_eof_cb_t)(bool error);
+void sd_player_set_eof_callback(sd_player_eof_cb_t cb);
+
+// Single-track mode: when enabled, sd_player plays one file and calls
+// eof_cb instead of auto-advancing to the next track in the folder.
+// Used by queue_manager to control track sequencing externally.
+void sd_player_set_single_track_mode(bool enabled);
 
 //--------------------------------------------------------------------+
 // Status queries (thread-safe)

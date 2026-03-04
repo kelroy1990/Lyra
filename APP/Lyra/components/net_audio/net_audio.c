@@ -99,6 +99,7 @@ typedef struct {
 
 static net_audio_t s_net = {0};
 static TaskHandle_t s_task_handle = NULL;
+static net_audio_eof_cb_t s_eof_cb = NULL;
 
 //--------------------------------------------------------------------+
 // dr_libs HTTP callbacks (shared across codec types)
@@ -586,7 +587,8 @@ static void run_decode_loop(void)
         if (dec_us > s_net.diag.decode_max_us) s_net.diag.decode_max_us = dec_us;
 
         if (frames <= 0) {
-            if (frames < 0) {
+            bool was_error = (frames < 0);
+            if (was_error) {
                 ESP_LOGE(TAG, "Decode error: %ld", (long)frames);
                 s_net.diag.error_count++;
             } else {
@@ -595,6 +597,7 @@ static void run_decode_loop(void)
             cleanup_stream();
             s_net.audio.switch_source(s_net.audio.audio_source_usb, 0, 0);
             s_net.state = NET_AUDIO_IDLE;
+            if (s_eof_cb) s_eof_cb(was_error);
             return;
         }
 
@@ -653,6 +656,7 @@ static void net_audio_task(void *arg)
             if (!start_stream(cmd.url, cmd.codec_hint, cmd.referer)) {
                 ESP_LOGE(TAG, "Failed to start stream");
                 s_net.state = NET_AUDIO_IDLE;
+                if (s_eof_cb) s_eof_cb(true);
                 continue;
             }
             run_decode_loop();
@@ -780,4 +784,9 @@ net_audio_info_t net_audio_get_info(void)
     net_audio_info_t info;
     memcpy(&info, &s_net.info, sizeof(info));
     return info;
+}
+
+void net_audio_set_eof_callback(net_audio_eof_cb_t cb)
+{
+    s_eof_cb = cb;
 }

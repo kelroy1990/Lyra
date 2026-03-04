@@ -231,7 +231,7 @@ esp_err_t ota_c5_start_update(const char *firmware_url, ota_progress_cb_t progre
 // CDC command handler
 //--------------------------------------------------------------------+
 
-// Manifest URL (configurable via NVS in the future; hardcoded for now)
+// TODO: make manifest URL configurable via NVS (CDC `ota server <url>`)
 #define DEFAULT_MANIFEST_URL "https://updates.lyra-player.io/manifest.json"
 
 void ota_handle_cdc_command(const char *subcommand, ota_print_fn_t print_fn)

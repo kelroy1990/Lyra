@@ -12,4 +12,5 @@ idf_component_register(
         log
         freertos
         esp_timer
+        settings
 )

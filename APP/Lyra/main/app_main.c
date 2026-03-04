@@ -33,6 +33,11 @@
 #include "dlna.h"
 #include "spotify.h"
 #include "subsonic.h"
+#include "settings_store.h"
+#include "ota.h"
+#include "lastfm.h"
+#include "queue_manager.h"
+#include "library.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
@@ -821,6 +826,19 @@ static void cdc_printf(const char *fmt, ...)
     tud_cdc_write_flush();
 }
 
+static void save_audio_settings(void)
+{
+    settings_audio_t cfg = {
+        .preset       = (uint8_t)audio_pipeline_get_preset(),
+        .limiter_mode = (uint8_t)audio_pipeline_get_limiter_mode(),
+        .dsp_enabled  = audio_pipeline_is_enabled() ? 1 : 0,
+        .volume       = 80,  // TODO: read from codec_dev when volume control exists
+        .shuffle      = sd_player_get_shuffle() ? 1 : 0,
+        .repeat_mode  = (uint8_t)sd_player_get_repeat(),
+    };
+    settings_save_audio(&cfg);
+}
+
 //--------------------------------------------------------------------+
 // SD Player audio callback wrappers (int ↔ audio_source_t)
 //--------------------------------------------------------------------+
@@ -907,7 +925,16 @@ static void net_services_task(void *arg)
     while (wireless_get_state() != WIRELESS_STATE_CONNECTED) {
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
-    ESP_LOGI(TAG, "NET svc: WiFi up — starting DLNA + Spotify");
+    ESP_LOGI(TAG, "NET svc: WiFi up — starting DLNA + Spotify + Subsonic reconnect");
+
+    // Subsonic: retry ping if credentials were stored but WiFi wasn't ready
+    if (subsonic_get_state() == SUBSONIC_ERROR) {
+        if (subsonic_reconnect() == ESP_OK) {
+            ESP_LOGI(TAG, "Subsonic auto-reconnect OK");
+        } else {
+            ESP_LOGW(TAG, "Subsonic auto-reconnect failed (server unreachable?)");
+        }
+    }
 
     // Register DLNA callbacks and start renderer
     static const dlna_control_cbs_t dlna_cbs = {
@@ -1533,6 +1560,15 @@ static bool handle_wifi_command(const char *cmd)
         }
 
         wireless_wifi_connect(ssid, pass, cdc_printf);
+
+        // Persist credentials on successful connection
+        if (wireless_wifi_is_connected()) {
+            settings_wifi_t wcfg = { .auto_connect = 1 };
+            strncpy(wcfg.ssid, ssid, sizeof(wcfg.ssid) - 1);
+            strncpy(wcfg.password, pass, sizeof(wcfg.password) - 1);
+            settings_save_wifi(&wcfg);
+            cdc_printf("WiFi credentials saved.\r\n");
+        }
         return true;
     }
 
@@ -1659,16 +1695,25 @@ static void cdc_task(void *arg)
                     if (strcmp(rx_buf, "help") == 0) {
                         tud_cdc_write_str("=== Lyra USB DAC Commands ===\r\n");
                         tud_cdc_write_str("Presets:\r\n");
-                        tud_cdc_write_str("  flat      - Flat (bypass)\r\n");
-                        tud_cdc_write_str("  rock      - Rock (+12dB bass)\r\n");
-                        tud_cdc_write_str("  jazz      - Jazz (smooth)\r\n");
-                        tud_cdc_write_str("  classical - Classical (V-shape)\r\n");
-                        tud_cdc_write_str("  headphone - Headphone (crossfeed)\r\n");
-                        tud_cdc_write_str("  bass      - Bass Boost (+8dB)\r\n");
-                        tud_cdc_write_str("  test      - TEST (+20dB @ 1kHz)\r\n");
+                        tud_cdc_write_str("  flat       - Flat (bypass)\r\n");
+                        tud_cdc_write_str("  rock       - Rock (+6dB bass)\r\n");
+                        tud_cdc_write_str("  jazz       - Jazz (smooth)\r\n");
+                        tud_cdc_write_str("  classical  - Classical (V-shape)\r\n");
+                        tud_cdc_write_str("  headphone  - Headphone (crossfeed)\r\n");
+                        tud_cdc_write_str("  bass       - Bass Boost (+8dB)\r\n");
+                        tud_cdc_write_str("  pop        - Pop (warm, bright)\r\n");
+                        tud_cdc_write_str("  metal      - Metal (heavy, scooped)\r\n");
+                        tud_cdc_write_str("  electronic - Electronic (sub-bass)\r\n");
+                        tud_cdc_write_str("  vocal      - Vocal (forward mids)\r\n");
+                        tud_cdc_write_str("  acoustic   - Acoustic (airy)\r\n");
+                        tud_cdc_write_str("  user       - User parametric EQ\r\n");
+                        tud_cdc_write_str("  test       - TEST (+20dB @ 1kHz)\r\n");
                         tud_cdc_write_str("Control:\r\n");
                         tud_cdc_write_str("  on        - Enable DSP\r\n");
                         tud_cdc_write_str("  off       - Disable DSP (bypass)\r\n");
+                        tud_cdc_write_str("  limiter hard|soft - Set limiter mode\r\n");
+                        tud_cdc_write_str("  crossfeed on|off  - Headphone crossfeed\r\n");
+                        tud_cdc_write_str("  eq band/show/save/load - Parametric EQ\r\n");
                         tud_cdc_write_str("  status    - Show current settings\r\n");
                         tud_cdc_write_str("  cpu       - Task CPU%% / stack usage\r\n");
                         tud_cdc_write_str("Player:\r\n");
@@ -1681,6 +1726,8 @@ static void cdc_task(void *arg)
                         tud_cdc_write_str("  seek <sec>    - Seek to position\r\n");
                         tud_cdc_write_str("  track         - Current track info\r\n");
                         tud_cdc_write_str("  playlist      - Show playlist\r\n");
+                        tud_cdc_write_str("  shuffle [on|off] - Toggle/set shuffle\r\n");
+                        tud_cdc_write_str("  repeat [off|one|all] - Cycle/set repeat\r\n");
                         tud_cdc_write_str("SD Card:\r\n");
                         tud_cdc_write_str("  sd            - Card status\r\n");
                         tud_cdc_write_str("  sd df         - Disk usage\r\n");
@@ -1710,49 +1757,282 @@ static void cdc_task(void *arg)
                         tud_cdc_write_str("Subsonic/Navidrome:\r\n");
                         tud_cdc_write_str("  subsonic connect <url> <user> <pass>\r\n");
                         tud_cdc_write_str("  subsonic ping / status\r\n");
-                        tud_cdc_write_str("  subsonic albums [type]  - newest/random/frequent/recent\r\n");
-                        tud_cdc_write_str("  subsonic album <id>     - Show tracks\r\n");
-                        tud_cdc_write_str("  subsonic search <query> - Search music\r\n");
-                        tud_cdc_write_str("  subsonic play <id>      - Play album or track\r\n");
-                        tud_cdc_write_str("  subsonic next / prev    - Playlist navigation\r\n");
-                        tud_cdc_write_str("  subsonic stop\r\n");
+                        tud_cdc_write_str("  subsonic albums [type]    - newest/random/frequent/recent\r\n");
+                        tud_cdc_write_str("  subsonic album <id>       - Show tracks\r\n");
+                        tud_cdc_write_str("  subsonic artists          - List all artists\r\n");
+                        tud_cdc_write_str("  subsonic artist <id>      - Artist albums\r\n");
+                        tud_cdc_write_str("  subsonic playlists        - List playlists\r\n");
+                        tud_cdc_write_str("  subsonic playlist <id>    - Play playlist\r\n");
+                        tud_cdc_write_str("  subsonic search <query>   - Search music\r\n");
+                        tud_cdc_write_str("  subsonic play <id>        - Play album or track\r\n");
+                        tud_cdc_write_str("  subsonic bitrate [0|128|192|256|320]\r\n");
+                        tud_cdc_write_str("  subsonic next / prev / stop\r\n");
+                        tud_cdc_write_str("OTA:\r\n");
+                        tud_cdc_write_str("  ota version   - Show firmware version\r\n");
+                        tud_cdc_write_str("  ota check     - Check for updates\r\n");
+                        tud_cdc_write_str("  ota update    - Download and install update\r\n");
+                        tud_cdc_write_str("  ota rollback  - Rollback to previous firmware\r\n");
+                        tud_cdc_write_str("Last.fm:\r\n");
+                        tud_cdc_write_str("  lastfm auth <key> <secret> - Set API credentials\r\n");
+                        tud_cdc_write_str("  lastfm login <user> <pass> - Authenticate\r\n");
+                        tud_cdc_write_str("  lastfm status              - Show state\r\n");
+                        tud_cdc_write_str("  lastfm flush               - Send pending scrobbles\r\n");
+                        tud_cdc_write_str("Queue:\r\n");
+                        tud_cdc_write_str("  queue add sd|url|sub <arg> - Add track to queue\r\n");
+                        tud_cdc_write_str("  queue play/stop/next/prev  - Control playback\r\n");
+                        tud_cdc_write_str("  queue list/status/clear    - View/manage queue\r\n");
+                        tud_cdc_write_str("  queue shuffle/repeat       - Toggle modes\r\n");
+                        tud_cdc_write_str("Library:\r\n");
+                        tud_cdc_write_str("  lib fav add/list/play      - Favorites management\r\n");
+                        tud_cdc_write_str("  lib pl create/list/play    - Playlist management\r\n");
+                        tud_cdc_write_str("  lib history                - Recent tracks\r\n");
+                        tud_cdc_write_str("  lib save/stats             - Save / show stats\r\n");
                     } else if (strcmp(rx_buf, "flat") == 0) {
                         audio_pipeline_set_preset(PRESET_FLAT);
+                        save_audio_settings();
                         cdc_printf("Preset: Flat (bypass)\r\n");
                     } else if (strcmp(rx_buf, "rock") == 0) {
                         audio_pipeline_set_preset(PRESET_ROCK);
                         audio_pipeline_set_enabled(true);
+                        save_audio_settings();
                         cdc_printf("Preset: Rock\r\n");
                     } else if (strcmp(rx_buf, "jazz") == 0) {
                         audio_pipeline_set_preset(PRESET_JAZZ);
                         audio_pipeline_set_enabled(true);
+                        save_audio_settings();
                         cdc_printf("Preset: Jazz\r\n");
                     } else if (strcmp(rx_buf, "classical") == 0) {
                         audio_pipeline_set_preset(PRESET_CLASSICAL);
                         audio_pipeline_set_enabled(true);
+                        save_audio_settings();
                         cdc_printf("Preset: Classical\r\n");
                     } else if (strcmp(rx_buf, "headphone") == 0) {
                         audio_pipeline_set_preset(PRESET_HEADPHONE);
                         audio_pipeline_set_enabled(true);
+                        save_audio_settings();
                         cdc_printf("Preset: Headphone\r\n");
                     } else if (strcmp(rx_buf, "bass") == 0) {
                         audio_pipeline_set_preset(PRESET_BASS_BOOST);
                         audio_pipeline_set_enabled(true);
+                        save_audio_settings();
                         cdc_printf("Preset: Bass Boost\r\n");
+                    } else if (strcmp(rx_buf, "pop") == 0) {
+                        audio_pipeline_set_preset(PRESET_POP);
+                        audio_pipeline_set_enabled(true);
+                        save_audio_settings();
+                        cdc_printf("Preset: Pop\r\n");
+                    } else if (strcmp(rx_buf, "metal") == 0) {
+                        audio_pipeline_set_preset(PRESET_METAL);
+                        audio_pipeline_set_enabled(true);
+                        save_audio_settings();
+                        cdc_printf("Preset: Metal\r\n");
+                    } else if (strcmp(rx_buf, "electronic") == 0) {
+                        audio_pipeline_set_preset(PRESET_ELECTRONIC);
+                        audio_pipeline_set_enabled(true);
+                        save_audio_settings();
+                        cdc_printf("Preset: Electronic\r\n");
+                    } else if (strcmp(rx_buf, "vocal") == 0) {
+                        audio_pipeline_set_preset(PRESET_VOCAL);
+                        audio_pipeline_set_enabled(true);
+                        save_audio_settings();
+                        cdc_printf("Preset: Vocal\r\n");
+                    } else if (strcmp(rx_buf, "acoustic") == 0) {
+                        audio_pipeline_set_preset(PRESET_ACOUSTIC);
+                        audio_pipeline_set_enabled(true);
+                        save_audio_settings();
+                        cdc_printf("Preset: Acoustic\r\n");
+                    } else if (strcmp(rx_buf, "user") == 0) {
+                        audio_pipeline_set_preset(PRESET_USER);
+                        audio_pipeline_set_enabled(true);
+                        save_audio_settings();
+                        cdc_printf("Preset: User EQ (%d bands)\r\n",
+                                   audio_pipeline_get_user_band_count());
                     } else if (strcmp(rx_buf, "test") == 0) {
                         audio_pipeline_set_preset(PRESET_TEST_EXTREME);
                         audio_pipeline_set_enabled(true);
+                        save_audio_settings();
                         cdc_printf("Preset: TEST EXTREME (+20dB @ 1kHz)\r\n");
                     } else if (strcmp(rx_buf, "on") == 0) {
                         audio_pipeline_set_enabled(true);
+                        save_audio_settings();
                         cdc_printf("DSP: ON\r\n");
                     } else if (strcmp(rx_buf, "off") == 0) {
                         audio_pipeline_set_enabled(false);
+                        save_audio_settings();
                         cdc_printf("DSP: OFF (bypass)\r\n");
+                    } else if (strncmp(rx_buf, "limiter ", 8) == 0) {
+                        const char *mode = rx_buf + 8;
+                        while (*mode == ' ') mode++;
+                        if (strcmp(mode, "hard") == 0) {
+                            audio_pipeline_set_limiter_mode(DSP_LIMITER_HARD_CLIP);
+                            save_audio_settings();
+                            cdc_printf("Limiter: Hard Clip\r\n");
+                        } else if (strcmp(mode, "soft") == 0) {
+                            audio_pipeline_set_limiter_mode(DSP_LIMITER_SOFT);
+                            save_audio_settings();
+                            cdc_printf("Limiter: Soft (Pade tanh)\r\n");
+                        } else {
+                            cdc_printf("Usage: limiter hard|soft\r\n");
+                        }
+                    } else if (strcmp(rx_buf, "limiter") == 0) {
+                        cdc_printf("Limiter: %s\r\n",
+                                   audio_pipeline_get_limiter_mode() == DSP_LIMITER_SOFT
+                                   ? "Soft" : "Hard Clip");
+                    } else if (strncmp(rx_buf, "crossfeed ", 10) == 0) {
+                        const char *arg = rx_buf + 10;
+                        while (*arg == ' ') arg++;
+                        if (strcmp(arg, "on") == 0) {
+                            audio_pipeline_set_crossfeed(true);
+                            cdc_printf("Crossfeed: ON\r\n");
+                        } else if (strcmp(arg, "off") == 0) {
+                            audio_pipeline_set_crossfeed(false);
+                            cdc_printf("Crossfeed: OFF\r\n");
+                        } else {
+                            cdc_printf("Usage: crossfeed on|off\r\n");
+                        }
+                    } else if (strcmp(rx_buf, "crossfeed") == 0) {
+                        cdc_printf("Crossfeed: %s\r\n",
+                                   audio_pipeline_get_crossfeed() ? "ON" : "OFF");
+                    } else if (strncmp(rx_buf, "eq ", 3) == 0) {
+                        const char *eq_cmd = rx_buf + 3;
+                        while (*eq_cmd == ' ') eq_cmd++;
+
+                        if (strncmp(eq_cmd, "band ", 5) == 0) {
+                            // eq band <N> <type> <freq> <gain> <Q>
+                            int band_n;
+                            char type_str[16];
+                            float freq, gain, q;
+                            if (sscanf(eq_cmd + 5, "%d %15s %f %f %f",
+                                       &band_n, type_str, &freq, &gain, &q) == 5) {
+                                if (band_n < 0 || band_n >= 5) {
+                                    cdc_printf("Band must be 0-4\r\n");
+                                } else {
+                                    biquad_type_t type = BIQUAD_PEAK;
+                                    if (strcmp(type_str, "peak") == 0) type = BIQUAD_PEAK;
+                                    else if (strcmp(type_str, "lowshelf") == 0 || strcmp(type_str, "ls") == 0) type = BIQUAD_LOWSHELF;
+                                    else if (strcmp(type_str, "highshelf") == 0 || strcmp(type_str, "hs") == 0) type = BIQUAD_HIGHSHELF;
+                                    else if (strcmp(type_str, "lowpass") == 0 || strcmp(type_str, "lp") == 0) type = BIQUAD_LOWPASS;
+                                    else if (strcmp(type_str, "highpass") == 0 || strcmp(type_str, "hp") == 0) type = BIQUAD_HIGHPASS;
+                                    else if (strcmp(type_str, "notch") == 0) type = BIQUAD_NOTCH;
+                                    else {
+                                        cdc_printf("Types: peak ls hs lp hp notch\r\n");
+                                        goto eq_done;
+                                    }
+
+                                    biquad_params_t p = {
+                                        .type = type, .freq = freq,
+                                        .gain = gain, .q = q, .sample_rate = 48000,
+                                    };
+                                    audio_pipeline_set_user_band((uint8_t)band_n, &p);
+                                    audio_pipeline_set_preset(PRESET_USER);
+                                    audio_pipeline_set_enabled(true);
+                                    save_audio_settings();
+                                    cdc_printf("Band %d: %s %.0fHz %.1fdB Q%.2f\r\n",
+                                               band_n, type_str, freq, gain, q);
+                                }
+                            } else {
+                                cdc_printf("Usage: eq band <0-4> <type> <freq> <gain> <Q>\r\n");
+                                cdc_printf("Types: peak ls hs lp hp notch\r\n");
+                            }
+                        } else if (strcmp(eq_cmd, "show") == 0) {
+                            uint8_t nb = audio_pipeline_get_user_band_count();
+                            if (nb == 0) {
+                                cdc_printf("No user EQ bands configured.\r\n");
+                            } else {
+                                const char *type_names[] = {
+                                    "lp", "hp", "bp", "notch", "peak", "ls", "hs", "ap"
+                                };
+                                cdc_printf("=== User EQ (%d bands) ===\r\n", nb);
+                                for (uint8_t i = 0; i < nb; i++) {
+                                    const biquad_params_t *b = audio_pipeline_get_user_band(i);
+                                    if (b) {
+                                        cdc_printf("  %d: %s %.0fHz %.1fdB Q%.2f\r\n",
+                                                   i, type_names[b->type], b->freq, b->gain, b->q);
+                                    }
+                                }
+                            }
+                        } else if (strncmp(eq_cmd, "save ", 5) == 0) {
+                            // eq save <slot> [name]
+                            int slot;
+                            char eq_name[32] = "User EQ";
+                            if (sscanf(eq_cmd + 5, "%d %31[^\r\n]", &slot, eq_name) >= 1) {
+                                if (slot < 0 || slot >= 8) {
+                                    cdc_printf("Slot must be 0-7\r\n");
+                                } else {
+                                    uint8_t nb = audio_pipeline_get_user_band_count();
+                                    settings_user_eq_t ueq = {0};
+                                    strncpy(ueq.name, eq_name, sizeof(ueq.name) - 1);
+                                    ueq.num_bands = nb;
+                                    for (uint8_t i = 0; i < nb && i < SETTINGS_MAX_USER_EQ_BANDS; i++) {
+                                        const biquad_params_t *b = audio_pipeline_get_user_band(i);
+                                        if (b) {
+                                            ueq.bands[i].type = (uint8_t)b->type;
+                                            ueq.bands[i].freq = b->freq;
+                                            ueq.bands[i].gain = b->gain;
+                                            ueq.bands[i].q = b->q;
+                                        }
+                                    }
+                                    if (settings_save_user_eq((uint8_t)slot, &ueq) == ESP_OK) {
+                                        cdc_printf("Saved to slot %d: '%s'\r\n", slot, ueq.name);
+                                    } else {
+                                        cdc_printf("Error saving EQ\r\n");
+                                    }
+                                }
+                            } else {
+                                cdc_printf("Usage: eq save <0-7> [name]\r\n");
+                            }
+                        } else if (strncmp(eq_cmd, "load ", 5) == 0) {
+                            int slot = atoi(eq_cmd + 5);
+                            if (slot < 0 || slot >= 8) {
+                                cdc_printf("Slot must be 0-7\r\n");
+                            } else {
+                                settings_user_eq_t ueq;
+                                if (settings_load_user_eq((uint8_t)slot, &ueq) == ESP_OK && ueq.num_bands > 0) {
+                                    for (uint8_t i = 0; i < ueq.num_bands && i < 5; i++) {
+                                        biquad_params_t p = {
+                                            .type = (biquad_type_t)ueq.bands[i].type,
+                                            .freq = ueq.bands[i].freq,
+                                            .gain = ueq.bands[i].gain,
+                                            .q = ueq.bands[i].q,
+                                            .sample_rate = 48000,
+                                        };
+                                        audio_pipeline_set_user_band(i, &p);
+                                    }
+                                    audio_pipeline_set_preset(PRESET_USER);
+                                    audio_pipeline_set_enabled(true);
+                                    save_audio_settings();
+                                    cdc_printf("Loaded slot %d: '%s' (%d bands)\r\n",
+                                               slot, ueq.name, ueq.num_bands);
+                                } else {
+                                    cdc_printf("Slot %d is empty\r\n", slot);
+                                }
+                            }
+                        } else {
+                            cdc_printf("EQ commands:\r\n");
+                            cdc_printf("  eq band <0-4> <type> <freq> <gain> <Q>\r\n");
+                            cdc_printf("  eq show          - Show current bands\r\n");
+                            cdc_printf("  eq save <0-7> [name]\r\n");
+                            cdc_printf("  eq load <0-7>\r\n");
+                        }
+                        eq_done: ;
+                    } else if (strcmp(rx_buf, "eq") == 0) {
+                        cdc_printf("EQ commands:\r\n");
+                        cdc_printf("  eq band <0-4> <type> <freq> <gain> <Q>\r\n");
+                        cdc_printf("  eq show          - Show current bands\r\n");
+                        cdc_printf("  eq save <0-7> [name]\r\n");
+                        cdc_printf("  eq load <0-7>\r\n");
                     } else if (strcmp(rx_buf, "status") == 0) {
-                        cdc_printf("Status:\r\n  Preset: %s\r\n  DSP: %s\r\n",
+                        const char *rpt_names[] = {"OFF", "ONE", "ALL"};
+                        repeat_mode_t rpt = sd_player_get_repeat();
+                        cdc_printf("Status:\r\n  Preset: %s\r\n  DSP: %s\r\n  Limiter: %s\r\n  Crossfeed: %s\r\n"
+                                   "  Shuffle: %s\r\n  Repeat: %s\r\n",
                                    preset_get_name(audio_pipeline_get_preset()),
-                                   audio_pipeline_is_enabled() ? "ON" : "OFF");
+                                   audio_pipeline_is_enabled() ? "ON" : "OFF",
+                                   audio_pipeline_get_limiter_mode() == DSP_LIMITER_SOFT
+                                   ? "Soft" : "Hard Clip",
+                                   audio_pipeline_get_crossfeed() ? "ON" : "OFF",
+                                   sd_player_get_shuffle() ? "ON" : "OFF",
+                                   (rpt <= REPEAT_ALL) ? rpt_names[rpt] : "?");
                     } else if (strcmp(rx_buf, "cpu") == 0) {
                         // Delta-mode CPU stats: shows usage since last 'cpu' call
                         #define CPU_MAX_TASKS 16
@@ -1852,6 +2132,34 @@ static void cdc_task(void *arg)
                         sd_player_cmd_track_info();
                     } else if (strcmp(rx_buf, "playlist") == 0) {
                         sd_player_cmd_playlist_info();
+                    } else if (strncmp(rx_buf, "shuffle", 7) == 0) {
+                        const char *arg = rx_buf + 7;
+                        while (*arg == ' ') arg++;
+                        if (strcmp(arg, "on") == 0) {
+                            sd_player_cmd_set_shuffle(true);
+                        } else if (strcmp(arg, "off") == 0) {
+                            sd_player_cmd_set_shuffle(false);
+                        } else {
+                            // Toggle
+                            sd_player_cmd_set_shuffle(!sd_player_get_shuffle());
+                        }
+                        save_audio_settings();
+                    } else if (strncmp(rx_buf, "repeat", 6) == 0) {
+                        const char *arg = rx_buf + 6;
+                        while (*arg == ' ') arg++;
+                        if (strcmp(arg, "off") == 0) {
+                            sd_player_cmd_set_repeat(REPEAT_OFF);
+                        } else if (strcmp(arg, "one") == 0) {
+                            sd_player_cmd_set_repeat(REPEAT_ONE);
+                        } else if (strcmp(arg, "all") == 0) {
+                            sd_player_cmd_set_repeat(REPEAT_ALL);
+                        } else {
+                            // Cycle: off→one→all→off
+                            repeat_mode_t cur = sd_player_get_repeat();
+                            repeat_mode_t next = (cur >= REPEAT_ALL) ? REPEAT_OFF : (repeat_mode_t)(cur + 1);
+                            sd_player_cmd_set_repeat(next);
+                        }
+                        save_audio_settings();
                     } else if (strncmp(rx_buf, "sd", 2) == 0 && handle_sd_command(rx_buf)) {
                         // Handled by handle_sd_command
                     } else if (strncmp(rx_buf, "wifi ", 5) == 0 && handle_wifi_command(rx_buf)) {
@@ -1947,6 +2255,62 @@ static void cdc_task(void *arg)
                         const char *sub = rx_buf + 8;
                         while (*sub == ' ') sub++;
                         subsonic_handle_cdc_command(sub, cdc_printf);
+                    } else if (strncmp(rx_buf, "ota", 3) == 0) {
+                        const char *sub = rx_buf + 3;
+                        while (*sub == ' ') sub++;
+                        ota_handle_cdc_command(sub, cdc_printf);
+                    } else if (strncmp(rx_buf, "lastfm", 6) == 0) {
+                        const char *sub = rx_buf + 6;
+                        while (*sub == ' ') sub++;
+                        lastfm_handle_cdc_command(sub, cdc_printf);
+                    } else if (strncmp(rx_buf, "queue", 5) == 0) {
+                        const char *sub = rx_buf + 5;
+                        while (*sub == ' ') sub++;
+                        qm_handle_cdc_command(sub, cdc_printf);
+                    } else if (strncmp(rx_buf, "lib ", 4) == 0) {
+                        const char *sub = rx_buf + 4;
+                        // Handle "lib fav add" and "lib pl add <id>" with current track context
+                        if (strcmp(sub, "fav add") == 0 || strncmp(sub, "pl add ", 7) == 0) {
+                            lib_track_t lt = {0};
+                            bool have_track = false;
+                            audio_source_t src = audio_source_get();
+                            if (src == AUDIO_SOURCE_SD) {
+                                player_status_t ps = sd_player_get_status();
+                                if (ps.state != PLAYER_STATE_IDLE) {
+                                    lt.source = LIB_SOURCE_SD;
+                                    // Use filename as title (strip path)
+                                    const char *fname = strrchr(ps.current_file, '/');
+                                    strncpy(lt.title, fname ? fname + 1 : ps.current_file, sizeof(lt.title) - 1);
+                                    lt.duration_ms = ps.file_info.duration_ms;
+                                    strncpy(lt.file_path, ps.current_file, sizeof(lt.file_path) - 1);
+                                    have_track = true;
+                                }
+                            } else if (src == AUDIO_SOURCE_NET) {
+                                net_audio_info_t ni = net_audio_get_info();
+                                if (ni.sample_rate > 0) {
+                                    lt.source = LIB_SOURCE_NET;
+                                    strncpy(lt.title, ni.icy_title[0] ? ni.icy_title : "Net stream", sizeof(lt.title) - 1);
+                                    strncpy(lt.url, ni.url, sizeof(lt.url) - 1);
+                                    have_track = true;
+                                }
+                            }
+                            if (!have_track) {
+                                cdc_printf("No track playing\r\n");
+                            } else if (strcmp(sub, "fav add") == 0) {
+                                if (lib_favorite_add(&lt) == ESP_OK)
+                                    cdc_printf("Added to favorites: %s\r\n", lt.title);
+                                else
+                                    cdc_printf("Already in favorites or full\r\n");
+                            } else {
+                                uint8_t pl_id = (uint8_t)atoi(sub + 7);
+                                if (lib_playlist_add_track(pl_id, &lt) == ESP_OK)
+                                    cdc_printf("Added to playlist %d: %s\r\n", pl_id, lt.title);
+                                else
+                                    cdc_printf("Error adding to playlist %d\r\n", pl_id);
+                            }
+                        } else {
+                            lib_handle_cdc_command(sub, cdc_printf);
+                        }
                     } else {
                         cdc_printf("Unknown command. Type 'help'\r\n");
                     }
@@ -2004,6 +2368,16 @@ void app_main(void)
     // 1. I2C bus
     i2c_bus_init();
 
+    // 1.1. Settings store (NVS persistence)
+    esp_err_t settings_ret = settings_init();
+    if (settings_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Settings init failed: %s - using defaults",
+                 esp_err_to_name(settings_ret));
+    }
+
+    // 1.2. OTA: confirm this firmware boots OK (prevent auto-rollback)
+    ota_mark_valid();
+
     // 1.5. Power management (MAX77972 charger + fuel gauge)
 #if LYRA_HAS_MAX77972
     esp_err_t pwr_ret = power_init(i2c_bus);
@@ -2025,12 +2399,21 @@ void app_main(void)
     ESP_LOGI(TAG, "Init Audio Pipeline (DSP)...");
     audio_pipeline_init(48000, 32);  // Match initial I2S format
 
-    // For testing: Start with Rock preset to hear DSP effect immediately
-    audio_pipeline_set_preset(PRESET_ROCK);  // Bass +6dB, Treble +3dB
-    audio_pipeline_set_enabled(true);
-
-    // For production: Start with Flat (bypass)
-    // audio_pipeline_set_preset(PRESET_FLAT);
+    // Restore saved audio settings (or defaults)
+    {
+        settings_audio_t acfg;
+        if (settings_load_audio(&acfg) == ESP_OK) {
+            ESP_LOGI(TAG, "Restoring audio: preset=%d limiter=%d enabled=%d",
+                     acfg.preset, acfg.limiter_mode, acfg.dsp_enabled);
+            audio_pipeline_set_preset((eq_preset_t)acfg.preset);
+            audio_pipeline_set_limiter_mode((dsp_limiter_mode_t)acfg.limiter_mode);
+            audio_pipeline_set_enabled(acfg.dsp_enabled != 0);
+        } else {
+            ESP_LOGI(TAG, "No saved audio settings, using defaults");
+            audio_pipeline_set_preset(PRESET_ROCK);
+            audio_pipeline_set_enabled(true);
+        }
+    }
 
     ESP_LOGI(TAG, "Audio Pipeline initialized with preset: %s",
              preset_get_name(audio_pipeline_get_preset()));
@@ -2061,6 +2444,14 @@ void app_main(void)
     esp_err_t wifi_ret = wireless_init();
     if (wifi_ret == ESP_OK) {
         ESP_LOGI(TAG, "Wireless OK (C5 via SDIO)");
+
+        // Auto-connect WiFi from saved credentials
+        settings_wifi_t wcfg;
+        if (settings_load_wifi(&wcfg) == ESP_OK &&
+            wcfg.auto_connect && wcfg.ssid[0]) {
+            ESP_LOGI(TAG, "Auto-connecting WiFi: %s", wcfg.ssid);
+            wireless_wifi_connect(wcfg.ssid, wcfg.password, NULL);
+        }
     } else {
         ESP_LOGW(TAG, "Wireless init failed: %s - continuing without WiFi",
                  esp_err_to_name(wifi_ret));
@@ -2119,6 +2510,15 @@ void app_main(void)
     sd_player_init(cdc_printf, &sd_audio_cbs);
     sd_player_start_task();
 
+    // Restore shuffle/repeat from NVS (must be after sd_player_init)
+    {
+        settings_audio_t acfg;
+        if (settings_load_audio(&acfg) == ESP_OK) {
+            sd_player_cmd_set_shuffle(acfg.shuffle != 0);
+            sd_player_cmd_set_repeat((repeat_mode_t)acfg.repeat_mode);
+        }
+    }
+
     // 8. Net Audio (F8-A) — HTTP streaming engine
     static const net_audio_audio_cbs_t net_audio_cbs = {
         .get_source           = net_audio_cb_get_source,
@@ -2144,6 +2544,35 @@ void app_main(void)
     };
     spotify_init("Lyra", &spotify_cbs);
     subsonic_init();
+
+    // Auto-connect Subsonic from saved profile (non-blocking, needs WiFi)
+    {
+        int active_sub = settings_get_active_subsonic_profile();
+        if (active_sub >= 0) {
+            settings_subsonic_profile_t sprof;
+            if (settings_load_subsonic_profile(active_sub, &sprof) == ESP_OK) {
+                ESP_LOGI(TAG, "Subsonic profile ready: %s@%s (will connect when WiFi up)",
+                         sprof.username, sprof.server_url);
+                // Connect attempt — will fail gracefully if WiFi not ready yet
+                subsonic_connect(sprof.server_url, sprof.username,
+                                  sprof.password, NULL);
+                // Restore max_bitrate setting
+                if (sprof.max_bitrate > 0) {
+                    subsonic_set_max_bitrate(sprof.max_bitrate);
+                    ESP_LOGI(TAG, "Subsonic bitrate: %d kbps", sprof.max_bitrate);
+                }
+            }
+        }
+    }
+
+    // Last.fm scrobbling client
+    lastfm_init();
+
+    // Cross-source playback queue (registers EOF callbacks with net_audio + sd_player)
+    qm_init();
+
+    // Library: favorites, playlists, history (loads JSON from SD into PSRAM cache)
+    library_init();
 
     // 10. Network services task — waits for WiFi, then starts DLNA renderer + Spotify
     // Runs at priority 2 (below audio pipeline) on any core

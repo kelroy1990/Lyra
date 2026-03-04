@@ -44,6 +44,12 @@ static drmp3_bool32 mp3_tell_cb(void *userdata, drmp3_int64 *pCursor)
 // Static buffer for float→int32 conversion (480 stereo frames)
 static float s_mp3_float_buf[480 * 2];
 
+// Gapless: encoder delay/padding trimming state
+static uint64_t s_mp3_delay_remaining;  // frames to skip at start (encoder delay)
+static uint64_t s_mp3_total_playable;   // max frames to output (excludes padding)
+static uint64_t s_mp3_frames_output;    // frames delivered so far
+static bool     s_mp3_gapless;          // true if Xing/LAME header provided delay info
+
 static int32_t mp3_decode(codec_handle_t *h, int32_t *buffer, uint32_t max_frames)
 {
     drmp3 *mp3 = (drmp3 *)h->mp3.drmp3;
@@ -51,8 +57,25 @@ static int32_t mp3_decode(codec_handle_t *h, int32_t *buffer, uint32_t max_frame
 
     if (max_frames > 480) max_frames = 480;  // clamp to static buffer size
 
+    // Skip encoder delay at start (gapless)
+    while (s_mp3_gapless && s_mp3_delay_remaining > 0) {
+        uint32_t skip = (s_mp3_delay_remaining > 480) ? 480 : (uint32_t)s_mp3_delay_remaining;
+        drmp3_uint64 got = drmp3_read_pcm_frames_f32(mp3, skip, s_mp3_float_buf);
+        if (got == 0) return 0;
+        s_mp3_delay_remaining -= got;
+    }
+
+    // Limit to avoid decoder padding at end (gapless)
+    if (s_mp3_gapless) {
+        uint64_t remaining = s_mp3_total_playable - s_mp3_frames_output;
+        if (remaining == 0) return 0;
+        if (max_frames > remaining) max_frames = (uint32_t)remaining;
+    }
+
     drmp3_uint64 frames = drmp3_read_pcm_frames_f32(mp3, max_frames, s_mp3_float_buf);
     if (frames == 0) return 0;
+
+    if (s_mp3_gapless) s_mp3_frames_output += frames;
 
     uint32_t channels = h->info.channels;
 
@@ -82,6 +105,13 @@ static bool mp3_seek(codec_handle_t *h, uint64_t frame_pos)
 {
     drmp3 *mp3 = (drmp3 *)h->mp3.drmp3;
     if (!mp3) return false;
+
+    // After seek, delay has already been skipped; update output counter
+    if (s_mp3_gapless) {
+        s_mp3_delay_remaining = 0;
+        s_mp3_frames_output = frame_pos;
+    }
+
     return drmp3_seek_to_pcm_frame(mp3, frame_pos) == DRMP3_TRUE;
 }
 
@@ -97,6 +127,7 @@ static void mp3_close(codec_handle_t *h)
         free(mp3);
         h->mp3.drmp3 = NULL;
     }
+    s_mp3_gapless = false;
 }
 
 //--------------------------------------------------------------------+
@@ -142,14 +173,25 @@ bool codec_mp3_open(codec_handle_t *h)
     drmp3_uint64 uint64_max = (drmp3_uint64)0xFFFFFFFF << 32 | (drmp3_uint64)0xFFFFFFFF;
 
     if (mp3->totalPCMFrameCount != uint64_max) {
-        // Xing/Info header present — exact count
+        // Xing/Info header present — exact count + gapless info
         uint64_t total = mp3->totalPCMFrameCount;
         if (total >= mp3->delayInPCMFrames)
             total -= mp3->delayInPCMFrames;
         if (total >= mp3->paddingInPCMFrames)
             total -= mp3->paddingInPCMFrames;
         h->info.total_frames = total;
+
+        // Enable gapless trimming
+        s_mp3_delay_remaining = mp3->delayInPCMFrames;
+        s_mp3_total_playable  = total;
+        s_mp3_frames_output   = 0;
+        s_mp3_gapless         = true;
+        ESP_LOGI(TAG, "MP3 gapless: delay=%llu padding=%llu playable=%llu",
+                 (unsigned long long)mp3->delayInPCMFrames,
+                 (unsigned long long)mp3->paddingInPCMFrames,
+                 (unsigned long long)total);
     } else if (file_size > 0 && mp3->sampleRate > 0) {
+        s_mp3_gapless = false;
         // No Xing header — estimate from file size + first frame bitrate
         // Bitrate lookup table (same as drmp3_hdr_bitrate_kbps internal function)
         static const uint8_t halfrate[2][3][15] = {
@@ -178,6 +220,7 @@ bool codec_mp3_open(codec_handle_t *h)
         }
     } else {
         h->info.total_frames = 0;
+        s_mp3_gapless = false;
     }
 
     h->vt = &mp3_vtable;

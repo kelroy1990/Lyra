@@ -17,6 +17,11 @@ static const char *TAG = "dsp_chain";
 // Soft limiter threshold (only used in DSP_LIMITER_SOFT mode)
 #define SOFT_LIMITER_THRESHOLD 0.95f
 
+// Crossfeed defaults
+#define CROSSFEED_FREQ     700.0f    // Crossover frequency (Hz)
+#define CROSSFEED_FEED_DB  (-4.5f)   // Feed level (dB)
+#define CROSSFEED_FEED     0.5957f   // 10^(-4.5/20) — pre-calculated
+
 // Maximum frames per batch (384kHz × 8 USB packets / 1000 = 392 max)
 #define MAX_BATCH_FRAMES 400
 
@@ -58,6 +63,39 @@ static inline void biquad_process_mono(float *buf, int len,
 }
 
 //--------------------------------------------------------------------+
+// Crossfeed initialization
+//--------------------------------------------------------------------+
+
+/**
+ * @brief Compute lowpass biquad coefficients for crossfeed
+ *
+ * RBJ Cookbook lowpass (Butterworth Q=0.7071) at the given crossover frequency.
+ * Called once at init and when sample rate changes.
+ */
+static void crossfeed_init(crossfeed_state_t *cf, uint32_t sample_rate)
+{
+    // RBJ lowpass @ CROSSFEED_FREQ, Q=0.7071 (Butterworth)
+    float w0 = 2.0f * (float)M_PI * CROSSFEED_FREQ / (float)sample_rate;
+    float cos_w0 = cosf(w0);
+    float sin_w0 = sinf(w0);
+    float alpha = sin_w0 / (2.0f * 0.7071f);
+
+    float a0 = 1.0f + alpha;
+    cf->coef[0] = ((1.0f - cos_w0) / 2.0f) / a0;  // b0
+    cf->coef[1] = (1.0f - cos_w0)           / a0;  // b1
+    cf->coef[2] = ((1.0f - cos_w0) / 2.0f) / a0;  // b2
+    cf->coef[3] = (-2.0f * cos_w0)          / a0;  // a1
+    cf->coef[4] = (1.0f - alpha)             / a0;  // a2
+
+    cf->w_l[0] = cf->w_l[1] = 0.0f;
+    cf->w_r[0] = cf->w_r[1] = 0.0f;
+    cf->feed = CROSSFEED_FEED;
+
+    ESP_LOGI(TAG, "Crossfeed initialized: %dHz crossover, %.1fdB feed, fs=%lu",
+             (int)CROSSFEED_FREQ, CROSSFEED_FEED_DB, (unsigned long)sample_rate);
+}
+
+//--------------------------------------------------------------------+
 // DSP Chain Initialization
 //--------------------------------------------------------------------+
 
@@ -94,20 +132,28 @@ bool dsp_chain_load_preset(dsp_chain_t *chain, eq_preset_t preset)
     // Clear existing filters
     chain->num_biquads = 0;
 
-    // Load biquad filters from preset — always calculate dynamically
-    for (uint8_t i = 0; i < config->num_filters && i < DSP_MAX_BIQUADS; i++) {
-        biquad_params_t params = config->filters[i];
-        params.sample_rate = chain->format.sample_rate;
-        biquad_init(&chain->biquads[i], &params);
-
-        chain->num_biquads++;
+    if (preset == PRESET_USER) {
+        // User-defined parametric EQ: use user_bands[] instead of preset config
+        for (uint8_t i = 0; i < chain->user_num_bands && i < DSP_MAX_BIQUADS; i++) {
+            biquad_params_t params = chain->user_bands[i];
+            params.sample_rate = chain->format.sample_rate;
+            biquad_init(&chain->biquads[i], &params);
+            chain->num_biquads++;
+        }
+    } else {
+        // Load biquad filters from preset — always calculate dynamically
+        for (uint8_t i = 0; i < config->num_filters && i < DSP_MAX_BIQUADS; i++) {
+            biquad_params_t params = config->filters[i];
+            params.sample_rate = chain->format.sample_rate;
+            biquad_init(&chain->biquads[i], &params);
+            chain->num_biquads++;
+        }
     }
 
     // Enable crossfeed if preset specifies
     chain->crossfeed_enabled = config->enable_crossfeed;
     if (chain->crossfeed_enabled) {
-        ESP_LOGI(TAG, "  Crossfeed: ENABLED");
-        // TODO: Initialize crossfeed
+        crossfeed_init(&chain->crossfeed, chain->format.sample_rate);
     }
 
     chain->current_preset = preset;
@@ -190,7 +236,12 @@ void dsp_chain_process(dsp_chain_t *restrict chain, int32_t *restrict buffer_i32
     }
 #endif
 
-    if (chain->bypass || chain->num_biquads == 0) {
+    if (chain->bypass) {
+        return;
+    }
+
+    // Nothing to do if no filters and no crossfeed
+    if (chain->num_biquads == 0 && !chain->crossfeed_enabled) {
         return;
     }
 
@@ -214,6 +265,45 @@ void dsp_chain_process(dsp_chain_t *restrict chain, int32_t *restrict buffer_i32
         biquad_filter_t *f = &chain->biquads[i];
         biquad_process_mono(s_buf_L, frames, f->coef, f->w[0]);
         biquad_process_mono(s_buf_R, frames, f->coef, f->w[1]);
+    }
+
+    //----------------------------------------------------------------
+    // Step 2.5: Crossfeed (if enabled)
+    //
+    // Bauer stereophonic-to-binaural: mix a lowpassed version of the
+    // opposite channel.  L_out = L + feed * LP(R), R_out = R + feed * LP(L)
+    //
+    // Uses DFII-T inline to compute the lowpass output per sample
+    // without modifying the original buffers (non-destructive).
+    //----------------------------------------------------------------
+    if (chain->crossfeed_enabled) {
+        crossfeed_state_t *cf = &chain->crossfeed;
+        const float b0 = cf->coef[0], b1 = cf->coef[1], b2 = cf->coef[2];
+        const float a1 = cf->coef[3], a2 = cf->coef[4];
+        const float feed = cf->feed;
+        float wl0 = cf->w_l[0], wl1 = cf->w_l[1];
+        float wr0 = cf->w_r[0], wr1 = cf->w_r[1];
+
+        for (uint32_t i = 0; i < frames; i++) {
+            // LP filter on left channel (produces signal to feed into right)
+            float xl = s_buf_L[i];
+            float lp_l = b0 * xl + wl0;
+            wl0 = b1 * xl - a1 * lp_l + wl1;
+            wl1 = b2 * xl - a2 * lp_l;
+
+            // LP filter on right channel (produces signal to feed into left)
+            float xr = s_buf_R[i];
+            float lp_r = b0 * xr + wr0;
+            wr0 = b1 * xr - a1 * lp_r + wr1;
+            wr1 = b2 * xr - a2 * lp_r;
+
+            // Mix crossfeed
+            s_buf_L[i] = xl + feed * lp_r;
+            s_buf_R[i] = xr + feed * lp_l;
+        }
+
+        cf->w_l[0] = wl0; cf->w_l[1] = wl1;
+        cf->w_r[0] = wr0; cf->w_r[1] = wr1;
     }
 
     //----------------------------------------------------------------
@@ -283,6 +373,53 @@ dsp_limiter_mode_t dsp_chain_get_limiter_mode(const dsp_chain_t *chain)
     return chain->limiter_mode;
 }
 
+void dsp_chain_set_crossfeed(dsp_chain_t *chain, bool enabled)
+{
+    if (enabled && !chain->crossfeed_enabled) {
+        crossfeed_init(&chain->crossfeed, chain->format.sample_rate);
+    }
+    chain->crossfeed_enabled = enabled;
+    ESP_LOGI(TAG, "Crossfeed: %s", enabled ? "ON" : "OFF");
+}
+
+bool dsp_chain_get_crossfeed(const dsp_chain_t *chain)
+{
+    return chain->crossfeed_enabled;
+}
+
+bool dsp_chain_set_user_band(dsp_chain_t *chain, uint8_t band,
+                              const biquad_params_t *params)
+{
+    if (band >= DSP_MAX_USER_BANDS) return false;
+
+    chain->user_bands[band] = *params;
+
+    // Extend band count if needed
+    if (band >= chain->user_num_bands) {
+        chain->user_num_bands = band + 1;
+    }
+
+    // If currently on user preset, reload to apply changes immediately
+    if (chain->current_preset == PRESET_USER) {
+        dsp_chain_load_preset(chain, PRESET_USER);
+    }
+
+    ESP_LOGI(TAG, "User band %d: type=%d freq=%.0f gain=%.1f Q=%.2f",
+             band, params->type, params->freq, params->gain, params->q);
+    return true;
+}
+
+uint8_t dsp_chain_get_user_band_count(const dsp_chain_t *chain)
+{
+    return chain->user_num_bands;
+}
+
+const biquad_params_t *dsp_chain_get_user_band(const dsp_chain_t *chain, uint8_t band)
+{
+    if (band >= chain->user_num_bands) return NULL;
+    return &chain->user_bands[band];
+}
+
 void dsp_chain_update_format(dsp_chain_t *chain, const audio_format_t *format)
 {
     ESP_LOGI(TAG, "Updating format: %lu Hz -> %lu Hz",
@@ -305,7 +442,11 @@ void dsp_chain_reset(dsp_chain_t *chain)
         biquad_reset(&chain->biquads[i]);
     }
 
-    // TODO: Reset crossfeed state
+    // Reset crossfeed state
+    if (chain->crossfeed_enabled) {
+        chain->crossfeed.w_l[0] = chain->crossfeed.w_l[1] = 0.0f;
+        chain->crossfeed.w_r[0] = chain->crossfeed.w_r[1] = 0.0f;
+    }
 
     ESP_LOGI(TAG, "DSP chain state reset");
 }

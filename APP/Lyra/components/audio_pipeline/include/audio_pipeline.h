@@ -73,6 +73,31 @@ void audio_pipeline_set_limiter_mode(dsp_limiter_mode_t mode);
 dsp_limiter_mode_t audio_pipeline_get_limiter_mode(void);
 
 /**
+ * @brief Enable/disable crossfeed
+ */
+void audio_pipeline_set_crossfeed(bool enabled);
+
+/**
+ * @brief Get crossfeed state
+ */
+bool audio_pipeline_get_crossfeed(void);
+
+/**
+ * @brief Set a user-defined EQ band (for PRESET_USER)
+ */
+bool audio_pipeline_set_user_band(uint8_t band, const biquad_params_t *params);
+
+/**
+ * @brief Get user band count
+ */
+uint8_t audio_pipeline_get_user_band_count(void);
+
+/**
+ * @brief Get user band parameters
+ */
+const biquad_params_t *audio_pipeline_get_user_band(uint8_t band);
+
+/**
  * @brief Update audio format (called when USB format changes)
  *
  * @param sample_rate New sample rate (Hz)

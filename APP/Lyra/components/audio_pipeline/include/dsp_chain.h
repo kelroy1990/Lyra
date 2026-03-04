@@ -51,6 +51,19 @@ typedef struct {
 } dsp_budget_t;
 
 /**
+ * @brief Crossfeed state (Bauer stereophonic-to-binaural)
+ *
+ * Mixes a low-passed version of the opposite channel to simulate
+ * speaker listening on headphones. 700Hz crossover, -4.5dB feed.
+ */
+typedef struct {
+    float coef[5];    ///< Lowpass biquad coefficients @ 700Hz
+    float w_l[2];     ///< DFII-T state for left channel LP
+    float w_r[2];     ///< DFII-T state for right channel LP
+    float feed;       ///< Cross-feed gain (-4.5dB = 0.5957)
+} crossfeed_state_t;
+
+/**
  * @brief DSP chain state
  */
 typedef struct {
@@ -60,7 +73,12 @@ typedef struct {
 
     // Crossfeed (optional, for headphones)
     bool crossfeed_enabled;
-    // TODO: Implement crossfeed structure
+    crossfeed_state_t crossfeed;
+
+    // User-defined parametric EQ bands (for PRESET_USER)
+    #define DSP_MAX_USER_BANDS 5
+    biquad_params_t user_bands[DSP_MAX_USER_BANDS];
+    uint8_t user_num_bands;
 
     // Current preset
     eq_preset_t current_preset;
@@ -169,6 +187,43 @@ void dsp_chain_set_limiter_mode(dsp_chain_t *chain, dsp_limiter_mode_t mode);
  * @return Current limiter mode
  */
 dsp_limiter_mode_t dsp_chain_get_limiter_mode(const dsp_chain_t *chain);
+
+/**
+ * @brief Enable/disable crossfeed
+ *
+ * @param chain Pointer to DSP chain
+ * @param enabled true to enable, false to disable
+ */
+void dsp_chain_set_crossfeed(dsp_chain_t *chain, bool enabled);
+
+/**
+ * @brief Get crossfeed state
+ *
+ * @param chain Pointer to DSP chain
+ * @return true if crossfeed is enabled
+ */
+bool dsp_chain_get_crossfeed(const dsp_chain_t *chain);
+
+/**
+ * @brief Set a user-defined EQ band
+ *
+ * @param chain Pointer to DSP chain
+ * @param band Band index (0 to DSP_MAX_USER_BANDS-1)
+ * @param params Filter parameters (type, freq, gain, Q)
+ * @return true if successful
+ */
+bool dsp_chain_set_user_band(dsp_chain_t *chain, uint8_t band,
+                              const biquad_params_t *params);
+
+/**
+ * @brief Get user-defined EQ band count
+ */
+uint8_t dsp_chain_get_user_band_count(const dsp_chain_t *chain);
+
+/**
+ * @brief Get user-defined EQ band parameters
+ */
+const biquad_params_t *dsp_chain_get_user_band(const dsp_chain_t *chain, uint8_t band);
 
 //--------------------------------------------------------------------+
 // CPU Budget Management API

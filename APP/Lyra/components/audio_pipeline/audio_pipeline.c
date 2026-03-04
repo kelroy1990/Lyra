@@ -82,6 +82,31 @@ dsp_limiter_mode_t audio_pipeline_get_limiter_mode(void)
     return dsp_chain_get_limiter_mode(&g_dsp_chain);
 }
 
+void audio_pipeline_set_crossfeed(bool enabled)
+{
+    dsp_chain_set_crossfeed(&g_dsp_chain, enabled);
+}
+
+bool audio_pipeline_get_crossfeed(void)
+{
+    return dsp_chain_get_crossfeed(&g_dsp_chain);
+}
+
+bool audio_pipeline_set_user_band(uint8_t band, const biquad_params_t *params)
+{
+    return dsp_chain_set_user_band(&g_dsp_chain, band, params);
+}
+
+uint8_t audio_pipeline_get_user_band_count(void)
+{
+    return dsp_chain_get_user_band_count(&g_dsp_chain);
+}
+
+const biquad_params_t *audio_pipeline_get_user_band(uint8_t band)
+{
+    return dsp_chain_get_user_band(&g_dsp_chain, band);
+}
+
 //--------------------------------------------------------------------+
 // Format Updates
 //--------------------------------------------------------------------+

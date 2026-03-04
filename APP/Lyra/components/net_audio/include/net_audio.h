@@ -93,3 +93,8 @@ typedef struct {
 } net_audio_info_t;
 
 net_audio_info_t net_audio_get_info(void);
+
+// EOF callback: called when stream ends or errors.
+// error=false → normal EOF, error=true → decode/network error.
+typedef void (*net_audio_eof_cb_t)(bool error);
+void net_audio_set_eof_callback(net_audio_eof_cb_t cb);

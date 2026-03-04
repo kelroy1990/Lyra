@@ -66,8 +66,25 @@ static char              s_ip_str[16]  = {0};
 
 static volatile bool     s_speed_abort = false;
 
+/* ── Auto-reconnect state ──────────────────────────────────────── */
+#define RECONNECT_MAX_RETRIES   5
+#define RECONNECT_DELAY_MS      2000
+
+static bool     s_auto_reconnect    = false;  // enabled after successful connect
+static int      s_reconnect_retries = 0;
+static bool     s_user_disconnect   = false;  // set by wireless_wifi_disconnect()
+static esp_timer_handle_t s_reconnect_timer = NULL;
+
 /* Forward declarations */
 static bool diag_ping_one(ip_addr_t *target, uint32_t *out_ms);
+
+/* ── Auto-reconnect timer callback (runs in esp_timer task, NOT event loop) */
+static void reconnect_timer_cb(void *arg)
+{
+    if (!s_auto_reconnect || s_user_disconnect) return;
+    s_state = WIRELESS_STATE_CONNECTING;
+    esp_wifi_connect();
+}
 
 /* ── Event handlers ────────────────────────────────────────────── */
 
@@ -102,7 +119,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         case WIFI_EVENT_STA_DISCONNECTED: {
             wifi_event_sta_disconnected_t *disc =
                 (wifi_event_sta_disconnected_t *)data;
-            ESP_LOGW(TAG, "WiFi disconnected (reason: %d)", disc ? disc->reason : -1);
+            int reason = disc ? disc->reason : -1;
+            ESP_LOGW(TAG, "WiFi disconnected (reason: %d)", reason);
             s_ip_str[0] = '\0';
             wireless_state_t prev = s_state;
             s_state = WIRELESS_STATE_DISCONNECTED;
@@ -110,6 +128,23 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
             if (prev == WIRELESS_STATE_CONNECTING && s_connect_sem) {
                 xSemaphoreGive(s_connect_sem);
             }
+            /* Auto-reconnect: schedule retry via timer (don't block event loop) */
+            if (s_auto_reconnect && !s_user_disconnect &&
+                s_reconnect_retries < RECONNECT_MAX_RETRIES) {
+                s_reconnect_retries++;
+                ESP_LOGI(TAG, "Auto-reconnect attempt %d/%d in %dms...",
+                         s_reconnect_retries, RECONNECT_MAX_RETRIES,
+                         RECONNECT_DELAY_MS);
+                if (s_reconnect_timer) {
+                    esp_timer_start_once(s_reconnect_timer,
+                                         RECONNECT_DELAY_MS * 1000ULL);
+                }
+            } else if (s_reconnect_retries >= RECONNECT_MAX_RETRIES) {
+                ESP_LOGE(TAG, "Auto-reconnect exhausted (%d attempts)",
+                         RECONNECT_MAX_RETRIES);
+                s_reconnect_retries = 0;
+            }
+            s_user_disconnect = false;
             break;
         }
         default:
@@ -154,6 +189,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         }
 
         s_state = WIRELESS_STATE_CONNECTED;
+        s_reconnect_retries = 0;  // Reset on successful connection
+        s_auto_reconnect = true;  // Enable auto-reconnect after any success
 
         if (s_connect_sem) {
             xSemaphoreGive(s_connect_sem);
@@ -283,11 +320,18 @@ esp_err_t wireless_init(void)
     s_connect_sem = xSemaphoreCreateBinary();
     s_state = WIRELESS_STATE_DISCONNECTED;
 
+    /* One-shot timer for auto-reconnect (avoids blocking the event loop) */
+    const esp_timer_create_args_t tmr_args = {
+        .callback = reconnect_timer_cb,
+        .name     = "wifi_reconn",
+    };
+    esp_timer_create(&tmr_args, &s_reconnect_timer);
+
     /*
-     * NOTE: After cold boot the C6 companion may need a few extra seconds
+     * NOTE: After cold boot the companion may need a few extra seconds
      * before SDIO data path is fully stable. The first wifi connect attempt
-     * can fail with "DHCP: not initialized". A second attempt succeeds.
-     * TODO: add automatic retry or readiness check if this becomes a UX issue.
+     * can fail with reason 208 (CONNECTION_FAIL). Auto-reconnect in the
+     * WIFI_EVENT_STA_DISCONNECTED handler retries up to 5 times with 2s delay.
      */
 
     ESP_LOGI(TAG, "Wireless ready (C5 via SDIO, WiFi STA mode)");
@@ -468,6 +512,9 @@ esp_err_t wireless_wifi_connect(const char *ssid, const char *password,
      * default handler and causes "invalid static ip" errors.
      */
     s_state = WIRELESS_STATE_CONNECTING;
+    s_auto_reconnect = true;
+    s_user_disconnect = false;
+    s_reconnect_retries = 0;
     xSemaphoreTake(s_connect_sem, 0);
 
     ret = esp_wifi_connect();
@@ -605,6 +652,8 @@ esp_err_t wireless_wifi_disconnect(void)
     if (s_state == WIRELESS_STATE_OFF || s_state == WIRELESS_STATE_ERROR) {
         return ESP_ERR_INVALID_STATE;
     }
+    s_user_disconnect = true;   // Suppress auto-reconnect
+    s_auto_reconnect = false;
     esp_wifi_disconnect();
     s_state = WIRELESS_STATE_DISCONNECTED;
     s_ip_str[0] = '\0';

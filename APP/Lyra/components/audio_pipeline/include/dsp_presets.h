@@ -22,6 +22,12 @@ typedef enum {
     PRESET_CLASSICAL,       ///< Classical: Slight V-shape
     PRESET_HEADPHONE,       ///< Headphone: Flat + Crossfeed
     PRESET_BASS_BOOST,      ///< Bass Boost: +8dB @ 80Hz
+    PRESET_POP,             ///< Pop: Warm bass, bright vocals, crisp highs
+    PRESET_METAL,           ///< Metal: Heavy bass, scooped mids, bright highs
+    PRESET_ELECTRONIC,      ///< Electronic: Deep sub-bass, bright presence
+    PRESET_VOCAL,           ///< Vocal: Reduced bass, forward mids
+    PRESET_ACOUSTIC,        ///< Acoustic: Less box, airy highs
+    PRESET_USER,            ///< User-defined parametric EQ
     PRESET_TEST_EXTREME,    ///< TEST: +20dB @ 1kHz (very audible)
     PRESET_COUNT            ///< Total number of presets
 } eq_preset_t;

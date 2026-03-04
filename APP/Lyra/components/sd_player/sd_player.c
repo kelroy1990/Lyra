@@ -12,6 +12,7 @@
 #include "freertos/queue.h"
 #include "freertos/stream_buffer.h"
 #include "esp_timer.h"
+#include "esp_random.h"
 
 static const char *TAG = "sd_player";
 
@@ -47,6 +48,8 @@ typedef enum {
     PLAYER_CMD_NEXT,
     PLAYER_CMD_PREV,
     PLAYER_CMD_SEEK,
+    PLAYER_CMD_SET_SHUFFLE,
+    PLAYER_CMD_SET_REPEAT,
 } player_cmd_type_t;
 
 typedef struct {
@@ -54,6 +57,8 @@ typedef struct {
     union {
         char filepath[160];
         uint32_t seek_seconds;
+        bool shuffle_enabled;
+        uint8_t repeat_mode;
     };
 } player_cmd_t;
 
@@ -90,6 +95,12 @@ static struct {
     int             track_count;
     int             track_index;
 
+    // Shuffle & repeat
+    bool            shuffle_enabled;
+    repeat_mode_t   repeat_mode;
+    int             shuffle_map[PLAYLIST_MAX_TRACKS];
+    int             shuffle_pos;       // current position in shuffle_map
+
     // CUE sheet (NULL when playing standalone files)
     cue_sheet_t    *cue;
     int             cue_track_index;   // current CUE track (0-based)
@@ -101,11 +112,17 @@ static struct {
     // Callbacks
     player_output_fn output;
     sd_player_audio_cbs_t audio;
+
+    // External control (queue_manager)
+    bool               single_track_mode;
+    sd_player_eof_cb_t eof_cb;
 } s_player;
 
 //--------------------------------------------------------------------+
 // Internal helpers
 //--------------------------------------------------------------------+
+
+static void generate_shuffle_map(void);  // forward declaration
 
 static void player_close_current(void)
 {
@@ -166,6 +183,11 @@ static void player_scan_folder(const char *filepath)
         }
     }
 
+    // Initialize shuffle map if shuffle is already enabled
+    if (s_player.shuffle_enabled && s_player.track_count > 0) {
+        generate_shuffle_map();
+    }
+
     ESP_LOGI(TAG, "Playlist: %d tracks in %s, current=%d",
              s_player.track_count, s_player.folder_path, s_player.track_index);
 }
@@ -173,6 +195,29 @@ static void player_scan_folder(const char *filepath)
 static void player_build_track_path(int index, char *out, size_t out_size)
 {
     snprintf(out, out_size, "%s/%s", s_player.folder_path, s_player.track_names[index]);
+}
+
+static void generate_shuffle_map(void)
+{
+    for (int i = 0; i < s_player.track_count; i++)
+        s_player.shuffle_map[i] = i;
+    for (int i = s_player.track_count - 1; i > 0; i--) {
+        int j = (int)(esp_random() % (uint32_t)(i + 1));
+        int tmp = s_player.shuffle_map[i];
+        s_player.shuffle_map[i] = s_player.shuffle_map[j];
+        s_player.shuffle_map[j] = tmp;
+    }
+    // Move current track to front so it doesn't repeat immediately
+    if (s_player.track_index >= 0) {
+        for (int i = 0; i < s_player.track_count; i++) {
+            if (s_player.shuffle_map[i] == s_player.track_index) {
+                s_player.shuffle_map[i] = s_player.shuffle_map[0];
+                s_player.shuffle_map[0] = s_player.track_index;
+                break;
+            }
+        }
+    }
+    s_player.shuffle_pos = 0;
 }
 
 // Try to load a CUE sheet for the given audio file or .cue path.
@@ -324,11 +369,25 @@ static void player_advance_track(bool forward)
     // ── CUE mode: seek within the single audio file ──
     if (s_player.cue) {
         if (forward) {
+            if (s_player.repeat_mode == REPEAT_ONE) {
+                // Restart current CUE track
+                uint64_t target = s_player.cue->tracks[s_player.cue_track_index].start_frame;
+                if (codec_seek(s_player.codec, target)) {
+                    s_player.frames_decoded = target;
+                    StreamBufferHandle_t stream = s_player.audio.get_stream_buffer();
+                    if (stream) xStreamBufferReset(stream);
+                }
+                return;
+            }
             s_player.cue_track_index++;
             if (s_player.cue_track_index >= s_player.cue->track_count) {
-                ESP_LOGI(TAG, "CUE: end of album");
-                player_stop();
-                return;
+                if (s_player.repeat_mode == REPEAT_ALL) {
+                    s_player.cue_track_index = 0;
+                } else {
+                    ESP_LOGI(TAG, "CUE: end of album");
+                    player_stop();
+                    return;
+                }
             }
         } else {
             // If >3s into track, restart current; else go to previous
@@ -368,11 +427,29 @@ static void player_advance_track(bool forward)
     }
 
     if (forward) {
-        s_player.track_index++;
-        if (s_player.track_index >= s_player.track_count) {
-            ESP_LOGI(TAG, "End of playlist");
-            player_stop();
-            return;
+        if (s_player.shuffle_enabled) {
+            s_player.shuffle_pos++;
+            if (s_player.shuffle_pos >= s_player.track_count) {
+                if (s_player.repeat_mode == REPEAT_ALL) {
+                    generate_shuffle_map();  // new permutation
+                } else {
+                    ESP_LOGI(TAG, "End of shuffled playlist");
+                    player_stop();
+                    return;
+                }
+            }
+            s_player.track_index = s_player.shuffle_map[s_player.shuffle_pos];
+        } else {
+            s_player.track_index++;
+            if (s_player.track_index >= s_player.track_count) {
+                if (s_player.repeat_mode == REPEAT_ALL) {
+                    s_player.track_index = 0;
+                } else {
+                    ESP_LOGI(TAG, "End of playlist");
+                    player_stop();
+                    return;
+                }
+            }
         }
     } else {
         uint32_t elapsed_ms = 0;
@@ -388,9 +465,17 @@ static void player_advance_track(bool forward)
             }
             return;
         }
-        s_player.track_index--;
-        if (s_player.track_index < 0) {
-            s_player.track_index = 0;
+        if (s_player.shuffle_enabled) {
+            if (s_player.shuffle_pos > 0) {
+                s_player.shuffle_pos--;
+                s_player.track_index = s_player.shuffle_map[s_player.shuffle_pos];
+            }
+            // shuffle_pos == 0: restart current (already handled by >3s rule above)
+        } else {
+            s_player.track_index--;
+            if (s_player.track_index < 0) {
+                s_player.track_index = 0;
+            }
         }
     }
 
@@ -462,6 +547,24 @@ static void player_process_commands(void)
             case PLAYER_CMD_PREV:
                 player_advance_track(false);
                 break;
+
+            case PLAYER_CMD_SET_SHUFFLE: {
+                s_player.shuffle_enabled = cmd.shuffle_enabled;
+                if (s_player.shuffle_enabled && s_player.track_count > 0) {
+                    generate_shuffle_map();
+                }
+                const char *sh_str = s_player.shuffle_enabled ? "ON" : "OFF";
+                if (s_player.output) s_player.output("Shuffle: %s\r\n", sh_str);
+                break;
+            }
+
+            case PLAYER_CMD_SET_REPEAT: {
+                s_player.repeat_mode = (repeat_mode_t)cmd.repeat_mode;
+                const char *rpt_names[] = {"OFF", "ONE", "ALL"};
+                const char *rpt = (cmd.repeat_mode <= 2) ? rpt_names[cmd.repeat_mode] : "?";
+                if (s_player.output) s_player.output("Repeat: %s\r\n", rpt);
+                break;
+            }
 
             case PLAYER_CMD_SEEK: {
                 if (!s_player.codec) break;
@@ -545,9 +648,25 @@ static void sd_player_task(void *arg)
         if (frames <= 0) {
             if (frames == 0) {
                 if (s_player.cue) {
-                    // In CUE mode, EOF = end of the entire audio file → stop
-                    ESP_LOGI(TAG, "CUE: audio file finished");
+                    // In CUE mode, EOF = end of the entire audio file
+                    if (s_player.repeat_mode == REPEAT_ALL) {
+                        codec_seek(s_player.codec, 0);
+                        s_player.frames_decoded = 0;
+                        s_player.cue_track_index = 0;
+                        s_player.track_index = 0;
+                        ESP_LOGI(TAG, "CUE: repeat all — restarting album");
+                    } else {
+                        ESP_LOGI(TAG, "CUE: audio file finished");
+                        player_stop();
+                    }
+                } else if (s_player.single_track_mode) {
+                    ESP_LOGI(TAG, "Single-track mode: track finished");
                     player_stop();
+                    if (s_player.eof_cb) s_player.eof_cb(false);
+                } else if (s_player.repeat_mode == REPEAT_ONE) {
+                    codec_seek(s_player.codec, 0);
+                    s_player.frames_decoded = 0;
+                    ESP_LOGI(TAG, "Repeat one — restarting track");
                 } else {
                     ESP_LOGI(TAG, "Track finished, advancing...");
                     player_advance_track(true);
@@ -555,6 +674,9 @@ static void sd_player_task(void *arg)
             } else {
                 ESP_LOGE(TAG, "Decode error, stopping");
                 player_stop();
+                if (s_player.single_track_mode && s_player.eof_cb) {
+                    s_player.eof_cb(true);
+                }
             }
             continue;
         }
@@ -618,16 +740,23 @@ static void sd_player_task(void *arg)
             if (ci + 1 < s_player.cue->track_count) {
                 uint64_t next_start = s_player.cue->tracks[ci + 1].start_frame;
                 if (s_player.frames_decoded >= next_start) {
-                    s_player.cue_track_index++;
-                    s_player.track_index = s_player.cue_track_index;
-                    cue_track_t *t = &s_player.cue->tracks[s_player.cue_track_index];
-                    ESP_LOGI(TAG, "CUE: → Track %d/%d: %s",
-                             s_player.cue_track_index + 1, s_player.cue->track_count,
-                             t->title[0] ? t->title : "(untitled)");
-                    if (s_player.output) {
-                        s_player.output("→ Track %d/%d: %s\r\n",
-                            s_player.cue_track_index + 1, s_player.cue->track_count,
-                            t->title[0] ? t->title : "(untitled)");
+                    if (s_player.repeat_mode == REPEAT_ONE) {
+                        // Seek back to start of current CUE track
+                        uint64_t target = s_player.cue->tracks[ci].start_frame;
+                        codec_seek(s_player.codec, target);
+                        s_player.frames_decoded = target;
+                    } else {
+                        s_player.cue_track_index++;
+                        s_player.track_index = s_player.cue_track_index;
+                        cue_track_t *t = &s_player.cue->tracks[s_player.cue_track_index];
+                        ESP_LOGI(TAG, "CUE: → Track %d/%d: %s",
+                                 s_player.cue_track_index + 1, s_player.cue->track_count,
+                                 t->title[0] ? t->title : "(untitled)");
+                        if (s_player.output) {
+                            s_player.output("→ Track %d/%d: %s\r\n",
+                                s_player.cue_track_index + 1, s_player.cue->track_count,
+                                t->title[0] ? t->title : "(untitled)");
+                        }
                     }
                 }
             }
@@ -735,6 +864,24 @@ void sd_player_cmd_seek(uint32_t seconds)
     xQueueSend(s_player.cmd_queue, &cmd, pdMS_TO_TICKS(100));
 }
 
+void sd_player_cmd_set_shuffle(bool enabled)
+{
+    player_cmd_t cmd = { .type = PLAYER_CMD_SET_SHUFFLE, .shuffle_enabled = enabled };
+    xQueueSend(s_player.cmd_queue, &cmd, pdMS_TO_TICKS(100));
+}
+
+void sd_player_cmd_set_repeat(repeat_mode_t mode)
+{
+    player_cmd_t cmd = { .type = PLAYER_CMD_SET_REPEAT, .repeat_mode = (uint8_t)mode };
+    xQueueSend(s_player.cmd_queue, &cmd, pdMS_TO_TICKS(100));
+}
+
+bool sd_player_get_shuffle(void) { return s_player.shuffle_enabled; }
+repeat_mode_t sd_player_get_repeat(void) { return s_player.repeat_mode; }
+
+void sd_player_set_eof_callback(sd_player_eof_cb_t cb) { s_player.eof_cb = cb; }
+void sd_player_set_single_track_mode(bool enabled) { s_player.single_track_mode = enabled; }
+
 //--------------------------------------------------------------------+
 // Public API: status queries
 //--------------------------------------------------------------------+
@@ -743,6 +890,8 @@ player_status_t sd_player_get_status(void)
 {
     player_status_t st = {0};
     st.state = s_player.state;
+    st.shuffle_enabled = s_player.shuffle_enabled;
+    st.repeat_mode = s_player.repeat_mode;
     strncpy(st.current_file, s_player.current_file, sizeof(st.current_file) - 1);
     st.file_info = s_player.current_info;
     st.current_frame = s_player.frames_decoded;

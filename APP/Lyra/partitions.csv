@@ -1,5 +1,22 @@
-# Lyra partition table (8MB flash min — W25Q64 final, GD25Q256 dev)
-# Name,   Type, SubType, Offset,   Size,     Flags
-nvs,      data, nvs,     0x9000,   0x6000,
-phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x300000,
+# Lyra partition table — 8 MB flash (W25Q64JVZPIQ final, GD25Q256EYIGR dev)
+#
+# Layout (8 MB = 0x800000):
+#   0x000000 - 0x008FFF  Bootloader (36 KB, reserved by IDF)
+#   0x009000 - 0x00EFFF  NVS system (24 KB — WiFi creds from C5, etc.)
+#   0x00F000 - 0x010FFF  OTA data (8 KB — active slot tracker)
+#   0x011000 - 0x011FFF  PHY init (4 KB)
+#   0x012000 - 0x01FFFF  (gap, 56 KB)
+#   0x020000 - 0x3CFFFF  OTA slot 0 (3.6875 MB — app firmware)
+#   0x3D0000 - 0x77FFFF  OTA slot 1 (3.6875 MB — app firmware)
+#   0x780000 - 0x7FFFFF  lyra_cfg (512 KB — user settings NVS)
+#
+# Binary size ~2.41 MB → 1.28 MB headroom per OTA slot.
+# lyra_cfg uses ~25 KB today (WiFi, audio, subsonic, EQ, Last.fm, metadata).
+#
+# Name,     Type, SubType, Offset,    Size
+nvs,        data, nvs,     0x9000,    0x6000
+otadata,    data, ota,     0xF000,    0x2000
+phy_init,   data, phy,     0x11000,   0x1000
+ota_0,      app,  ota_0,   0x20000,   0x3B0000
+ota_1,      app,  ota_1,   0x3D0000,  0x3B0000
+lyra_cfg,   data, nvs,     0x780000,  0x80000
